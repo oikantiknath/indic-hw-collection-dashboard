@@ -1,0 +1,29 @@
+# AWS CLI installation files
+aws/
+awscliv2.zip
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Data & cache files
+data_cache.parquet
+.page_count_cache.json
+.last_updated.json
+fetch_data.log
+
+# Secrets
+.env
+
+# Data files
+*.csv
+*.xlsx
+*.parquet
+
+# Screenshots / debug
+image.png
+
+# Scratch work
+scratch/
+rewrite.py
