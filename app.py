@@ -11,6 +11,12 @@ import json as _json
 import pypdf
 import urllib3
 import os
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # Load from .env file if exists
+
+
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -195,13 +201,14 @@ st.markdown("""
 # BUCKET CONFIG & HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-MINIO_ENDPOINT   = os.environ.get("MINIO_ENDPOINT")
-MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY")
-MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY")
-MINIO_BUCKET     = os.environ.get("MINIO_BUCKET")
-MINIO_PREFIX     = os.environ.get("MINIO_PREFIX")
-PAGE_CACHE_FILE  = Path(__file__).parent / ".page_count_cache.json"
+MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
+MINIO_BUCKET     = os.getenv("MINIO_BUCKET")
+MINIO_PREFIX     = os.getenv("MINIO_PREFIX")
 
+
+PAGE_CACHE_FILE  = Path(__file__).parent / ".page_count_cache.json"
 
 def _s3():
     return boto3.client(
@@ -214,16 +221,36 @@ def _s3():
     )
 
 
-def _presigned_url(key: str, expires: int = 3600) -> str:
-    """Generate a pre-signed URL for a PDF key."""
+def _presigned_url(key: str, expires: int = 3600) -> tuple[str, str, str]:
+    """Return (url, error, found_ext). url is empty string on failure. found_ext is the extension that exists (e.g. 'png') when PDF is missing but an image was found."""
     try:
-        return _s3().generate_presigned_url(
+        s3 = _s3()
+        try:
+            s3.head_object(Bucket=MINIO_BUCKET, Key=key)
+        except Exception:
+            # PDF missing — check for image alternatives
+            base = key[:-4] if key.endswith(".pdf") else key
+            for ext in ("png", "jpg", "jpeg", "tiff", "tif"):
+                alt_key = f"{base}.{ext}"
+                try:
+                    s3.head_object(Bucket=MINIO_BUCKET, Key=alt_key)
+                    alt_url = s3.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": MINIO_BUCKET, "Key": alt_key},
+                        ExpiresIn=expires,
+                    )
+                    return alt_url, "", ext
+                except Exception:
+                    continue
+            return "", "File does not exist in storage (404)", ""
+        url = s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": MINIO_BUCKET, "Key": key},
             ExpiresIn=expires,
         )
-    except Exception:
-        return ""
+        return url, "", "pdf"
+    except Exception as e:
+        return "", str(e), ""
 
 
 def _load_page_cache() -> dict:
@@ -972,10 +999,10 @@ if st.session_state["show_sample_checker"]:
 </div>
 """, unsafe_allow_html=True)
 
-            with st.spinner("Fetching PDF…"):
-                _pdf_url = _presigned_url(_pdf_key_val, expires=1800)
+            with st.spinner("Fetching file…"):
+                _pdf_url, _pdf_err, _found_ext = _presigned_url(_pdf_key_val, expires=1800)
 
-            if _pdf_url:
+            if _pdf_url and _found_ext == "pdf":
                 st.markdown(f"""
 <div style='background:#18181F;border:1px solid rgba(255,255,255,0.1);
      border-radius:12px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.5);'>
@@ -991,8 +1018,26 @@ if st.session_state["show_sample_checker"]:
           style="border:none;display:block;background:#fff;"></iframe>
 </div>
 """, unsafe_allow_html=True)
+            elif _pdf_url and _found_ext in ("png", "jpg", "jpeg", "tiff", "tif"):
+                st.warning(f"PDF not available — showing image file (.{_found_ext}) instead.")
+                st.markdown(f"""
+<div style='background:#18181F;border:1px solid rgba(255,255,255,0.1);
+     border-radius:12px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.5);'>
+  <div style='background:rgba(255,255,255,0.04);padding:8px 14px;display:flex;
+       align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.06);'>
+    <span style='font-size:0.75rem;font-weight:600;color:#A1A1AA;'>🖼 {_pdf_key_val.split("/")[-1].replace(".pdf", f".{_found_ext}")}</span>
+    <a href="{_pdf_url}" target="_blank"
+       style='font-size:0.72rem;color:#818CF8;text-decoration:none;font-weight:600;
+              background:rgba(129,140,248,0.1);padding:3px 10px;border-radius:6px;
+              border:1px solid rgba(129,140,248,0.3);'>↗ Open full screen</a>
+  </div>
+  <img src="{_pdf_url}" style="width:100%;display:block;background:#fff;" />
+</div>
+""", unsafe_allow_html=True)
             else:
                 st.error(f"PDF not found. Key: `{_pdf_key_val}`")
+                if _pdf_err:
+                    st.caption(f"Error: {_pdf_err}")
 
     st.markdown("---")
 
@@ -2034,35 +2079,35 @@ school_stats = filtered.groupby("school_name").agg(
 ).reset_index().sort_values("pages", ascending=False)
 school_stats["pg_per_student"] = (school_stats["pages"] / school_stats["students"]).round(1)
 
-_sch1, _sch2 = st.columns(2)
-with _sch1:
-    _top_schools = school_stats.head(15)
-    _fig = go.Figure(go.Bar(
-        x=_top_schools["school_name"], y=_top_schools["pages"],
-        marker_color=COLORS[2],
-        text=[f"{p:,}" for p in _top_schools["pages"]], textposition="outside",
-    ))
-    _fig.update_layout(**chart_layout(title="Top 15 Schools by Pages Collected",
-                                      xaxis=dict(tickangle=-35, showgrid=False, zeroline=False,
-                                                 showline=False, color="#A1A1AA")))
-    st.plotly_chart(_fig, use_container_width=True)
+# _sch1, _sch2 = st.columns(2)
+# with _sch1:
+#     _top_schools = school_stats.head(15)
+#     _fig = go.Figure(go.Bar(
+#         x=_top_schools["school_name"], y=_top_schools["pages"],
+#         marker_color=COLORS[2],
+#         text=[f"{p:,}" for p in _top_schools["pages"]], textposition="outside",
+#     ))
+#     _fig.update_layout(**chart_layout(title="Top 15 Schools by Pages Collected",
+#                                       xaxis=dict(tickangle=-35, showgrid=False, zeroline=False,
+#                                                  showline=False, color="#A1A1AA")))
+#     st.plotly_chart(_fig, use_container_width=True)
 
-with _sch2:
-    _pps = school_stats.sort_values("pg_per_student", ascending=True).head(15)
-    _fig = go.Figure(go.Bar(
-        x=_pps["pg_per_student"], y=_pps["school_name"],
-        orientation="h",
-        marker_color=[C_GREEN if v >= 50 else C_RED for v in _pps["pg_per_student"]],
-        text=[f"{v}" for v in _pps["pg_per_student"]], textposition="outside",
-    ))
-    _fig.add_vline(x=50, line_dash="dash", line_color=C_AMBER,
-        annotation_text="50 pg target", annotation_position="top right",
-        annotation_font_color=C_AMBER)
-    _fig.update_layout(**chart_layout(title="Avg Pages / Student by School",
-        height=max(370, len(_pps) * 28),
-        xaxis_title="Pages/Student",
-        yaxis=dict(showgrid=False, zeroline=False, showline=False, color="#A1A1AA")))
-    st.plotly_chart(_fig, use_container_width=True)
+# with _sch2:
+#     _pps = school_stats.sort_values("pg_per_student", ascending=True).head(15)
+#     _fig = go.Figure(go.Bar(
+#         x=_pps["pg_per_student"], y=_pps["school_name"],
+#         orientation="h",
+#         marker_color=[C_GREEN if v >= 50 else C_RED for v in _pps["pg_per_student"]],
+#         text=[f"{v}" for v in _pps["pg_per_student"]], textposition="outside",
+#     ))
+#     _fig.add_vline(x=50, line_dash="dash", line_color=C_AMBER,
+#         annotation_text="50 pg target", annotation_position="top right",
+#         annotation_font_color=C_AMBER)
+#     _fig.update_layout(**chart_layout(title="Avg Pages / Student by School",
+#         height=max(370, len(_pps) * 28),
+#         xaxis_title="Pages/Student",
+#         yaxis=dict(showgrid=False, zeroline=False, showline=False, color="#A1A1AA")))
+#     st.plotly_chart(_fig, use_container_width=True)
 
 with st.expander("View Detailed School Statistics", expanded=False):
     st.dataframe(

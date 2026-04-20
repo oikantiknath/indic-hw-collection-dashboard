@@ -22,6 +22,9 @@ import pandas as pd
 import pypdf
 import urllib3
 from botocore.client import Config
+from dotenv import load_dotenv
+
+load_dotenv()
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
