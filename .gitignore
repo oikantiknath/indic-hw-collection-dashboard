@@ -21,9 +21,10 @@ fetch_data.log
 *.xlsx
 *.parquet
 
-# Screenshots / debug
+
 image.png
 
 # Scratch work
 scratch/
 rewrite.py
+ref/

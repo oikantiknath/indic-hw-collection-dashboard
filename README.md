@@ -1,6 +1,6 @@
 # Indic Handwriting Collection Dashboard (OCR-VS)
 
-Access the live dashboard here: http://216.48.179.206:8503/
+Access the live dashboard here: https://untold-displace-proton.ngrok-free.dev/
 
 This is a Streamlit-based monitoring dashboard specifically designed to track the progress of Indic handwriting data collection across schools, validating against strict compliance targets. 
 
