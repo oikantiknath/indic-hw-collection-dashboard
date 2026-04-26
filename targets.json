@@ -1,0 +1,72 @@
+{
+  "phase1_total_pages": 2000000,
+  "per_language_pages": 200000,
+  "pg_per_participant": {
+    "Primary (1-5)": 50,
+    "High School (6-8)": 50,
+    "Secondary (9-10)": 50,
+    "Higher Secondary (11-12)": 50
+  },
+  "language_participants": {
+    "Hindi": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "Bengali": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "Kannada": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "Malayalam": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "Marathi": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "Odia": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "Punjabi": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "Tamil": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "Telugu": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    },
+    "English": {
+      "Primary (1-5)": 1000,
+      "High School (6-8)": 1000,
+      "Secondary (9-10)": 1000,
+      "Higher Secondary (11-12)": 1000
+    }
+  }
+}
