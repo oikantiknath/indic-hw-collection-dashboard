@@ -39,26 +39,39 @@ def make_chart_layout(theme: dict):
     _bg2         = theme["bg2"]
     _border      = theme["border"]
     _template    = "plotly_dark" if _dark else "plotly_white"
-    _grid_clr    = "rgba(255,255,255,0.03)" if _dark else "rgba(0,0,0,0.06)"
+    _grid_clr    = "rgba(255,255,255,0.05)" if _dark else "rgba(0,0,0,0.18)"
     # In light mode use the full dark text colour so tick labels / axis titles
     # are legible against the white/transparent chart background.
     _chart_text  = _text2 if _dark else _text
     _bar_textfont = dict(color=_text, family="Inter", size=11)
+
+    _axis_title_font = dict(color=_chart_text, family="Inter", size=12)
+    _axis_tick_font  = dict(color=_chart_text, family="Inter", size=11)
 
     def chart_layout(**kwargs):
         title_str = kwargs.pop("title", "")
         base = dict(
             template=_template,
             height=kwargs.pop("height", CHART_HEIGHT),
-            margin=dict(l=20, r=20, t=50, b=20),
+            margin=dict(l=40, r=20, t=50, b=55),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             title=dict(text=title_str, font=dict(size=15, color=_text, family="Inter")),
             font=dict(family="Inter", size=12, color=_chart_text),
-            xaxis=dict(showgrid=False, zeroline=False, showline=False, color=_chart_text,
-                       tickfont=dict(color=_chart_text), title_font=dict(color=_chart_text)),
-            yaxis=dict(showgrid=True, gridcolor=_grid_clr, zeroline=False, showline=False,
-                       color=_chart_text, tickfont=dict(color=_chart_text), title_font=dict(color=_chart_text)),
+            xaxis=dict(
+                showgrid=False, zeroline=False,
+                showline=not _dark, linecolor=_grid_clr, linewidth=1,
+                color=_chart_text,
+                tickfont=_axis_tick_font,
+                title=dict(font=_axis_title_font),
+            ),
+            yaxis=dict(
+                showgrid=True, gridcolor=_grid_clr, zeroline=False,
+                showline=not _dark, linecolor=_grid_clr, linewidth=1,
+                color=_chart_text,
+                tickfont=_axis_tick_font,
+                title=dict(font=_axis_title_font),
+            ),
             legend=dict(font=dict(color=_chart_text)),
             hoverlabel=dict(bgcolor=_bg2, font_color=_text, font_size=13,
                             font_family="Inter", bordercolor=_border),

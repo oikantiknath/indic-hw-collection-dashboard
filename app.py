@@ -4,7 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 import numpy as np
-import boto3
+import boto3 
 from botocore.client import Config
 import io
 import json as _json
@@ -85,6 +85,11 @@ if _dark:
     _btn_bg_hover     = "#2A2A3E"
     _btn_color        = "#E2E8F0"
     _btn_border       = "rgba(255,255,255,0.12)"
+    _accent           = "#818CF8"
+    _accent_bg        = "rgba(129,140,248,0.1)"
+    _accent_border    = "rgba(129,140,248,0.3)"
+    _error_color      = "#f87171"
+    _shadow           = "rgba(0,0,0,0.35)"
 else:
     _bg               = "#F4F6FB"
     _bg2              = "#FFFFFF"
@@ -115,6 +120,11 @@ else:
     _btn_bg_hover     = "#EEF2F9"
     _btn_color        = "#1E293B"
     _btn_border       = "rgba(99,102,241,0.25)"
+    _accent           = "#4F46E5"
+    _accent_bg        = "rgba(79,70,229,0.08)"
+    _accent_border    = "rgba(79,70,229,0.3)"
+    _error_color      = "#DC2626"
+    _shadow           = "rgba(99,102,241,0.10)"
 
 st.markdown(f"""
 <style>
@@ -126,17 +136,30 @@ st.markdown(f"""
         --secondary-background-color: {_bg3};
         --text-color: {_text};
         --font: 'Inter', sans-serif;
+        /* Glide-data-grid CSS vars — must be on :root for canvas tables to pick up */
+        --gdg-text-dark:               {_text};
+        --gdg-text-medium:             {_text2};
+        --gdg-text-light:              {_text4};
+        --gdg-bg-cell:                 {_bg2};
+        --gdg-bg-cell-medium:          {_bg3};
+        --gdg-bg-header:               {_bg3};
+        --gdg-bg-header-has-focus:     {_bg4};
+        --gdg-bg-header-hovered:       {_bg4};
+        --gdg-border-color:            {_border};
+        --gdg-horizontal-border-color: {_border};
+        --gdg-accent-color:            #6366F1;
+        --gdg-accent-light:            rgba(99,102,241,0.1);
     }}
 
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
-    .stApp > header {{ background-color: transparent !important; }}
+    .stApp > header {{ display: none !important; }}
     .stApp {{
         background-color: {_bg} !important;
         background-image:
             radial-gradient(circle at 15% 50%, rgba(99,102,241,0.06), transparent 40%),
             radial-gradient(circle at 85% 30%, rgba(16,185,129,0.04), transparent 40%);
     }}
-    .main .block-container {{ padding-top: 1.2rem; max-width: 1400px; }}
+    .main .block-container {{ padding-top: 0rem !important; margin-top: -5.5rem !important; max-width: 1400px; }}
 
     /* ── Base text & background ── */
     .stApp, .main, [data-testid="stAppViewContainer"] {{
@@ -217,6 +240,8 @@ st.markdown(f"""
         font-size: 0.8rem !important; text-transform: uppercase; letter-spacing: 0.5px;
     }}
     section[data-testid="stSidebar"] hr {{ border-color: {_sidebar_hr} !important; }}
+
+
 
     /* ── Sidebar selectbox controls ── */
     section[data-testid="stSidebar"] div[data-baseweb="select"] > div {{
@@ -524,33 +549,7 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# Theme toggle — styled via CSS to appear fixed top-right
-st.markdown(f"""
-<style>
-div[data-testid="stButton"]:has(button[key="toggle_theme"]) {{
-    position: fixed !important;
-    top: 12px !important;
-    right: 18px !important;
-    z-index: 99999 !important;
-    width: auto !important;
-}}
-div[data-testid="stButton"]:has(button[key="toggle_theme"]) button {{
-    background: {_toggle_bg} !important;
-    color: {_toggle_color} !important;
-    border: 1px solid {_border} !important;
-    border-radius: 20px !important;
-    padding: 4px 16px !important;
-    font-size: 1rem !important;
-    min-width: 0 !important;
-    width: auto !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important;
-}}
-div[data-testid="stButton"]:has(button[key="toggle_theme"]) button:hover {{
-    border-color: #6366F1 !important;
-    box-shadow: 0 4px 12px rgba(99,102,241,0.3) !important;
-}}
-</style>
-""", unsafe_allow_html=True)
+
 
 # Inject global styles targeting body-level Base Web popovers (teleport outside .stApp)
 st.markdown(f"""
@@ -606,9 +605,62 @@ body span[data-baseweb="tag"] span {{ color: {_text} !important; }}
 </style>
 """, unsafe_allow_html=True)
 
-if st.button(_theme_icon, key="toggle_theme", help="Toggle dark / light mode"):
-    st.session_state["dark_mode"] = not _dark
-    st.rerun()
+import streamlit.components.v1 as components
+components.html(f"""
+<script>
+    const parentDoc = window.parent.document;
+    const observer = new MutationObserver(() => {{
+        const buttons = parentDoc.querySelectorAll('button');
+        buttons.forEach(btn => {{
+            const testid = btn.getAttribute('data-testid');
+            const ariaLabel = btn.getAttribute('aria-label');
+            if (testid === 'collapsedControl' || testid === 'stSidebarCollapsedControl' || 
+               (ariaLabel && ariaLabel.toLowerCase().includes('sidebar'))) {{
+                
+                if (!btn.querySelector('.custom-filter-text')) {{
+                    const svg = btn.querySelector('svg');
+                    if (svg) svg.style.display = 'none';
+                    
+                    const span = parentDoc.createElement('span');
+                    span.className = 'custom-filter-text';
+                    span.innerText = 'Filters';
+                    span.style.fontWeight = '600';
+                    span.style.fontSize = '0.9rem';
+                    span.style.color = '{_text}';
+                    span.style.padding = '6px 16px';
+                    span.style.background = '{_bg2}';
+                    span.style.borderRadius = '8px';
+                    span.style.border = '1px solid {_border_card}';
+                    span.style.boxShadow = '0 4px 12px rgba(0,0,0,0.1)';
+                    span.style.display = 'block';
+                    
+                    btn.appendChild(span);
+                    btn.style.background = 'transparent';
+                    btn.style.border = 'none';
+                    btn.style.width = 'auto';
+                    btn.style.padding = '0';
+                    btn.style.position = 'fixed';
+                    btn.style.top = '14px';
+                    btn.style.left = '16px';
+                    btn.style.zIndex = '999999';
+                    
+                    btn.addEventListener('mouseover', () => {{
+                        span.style.background = '{_bg3}';
+                        span.style.borderColor = '#6366F1';
+                        span.style.color = '#6366F1';
+                    }});
+                    btn.addEventListener('mouseout', () => {{
+                        span.style.background = '{_bg2}';
+                        span.style.borderColor = '{_border_card}';
+                        span.style.color = '{_text}';
+                    }});
+                }}
+            }}
+        }});
+    }});
+    observer.observe(parentDoc.body, {{ childList: true, subtree: true }});
+</script>
+""", height=0, width=0)
 
 
 
@@ -658,6 +710,15 @@ def load_bucket_data(exact_pages: bool = False) -> pd.DataFrame:
         state_raw = str(meta.get("state") or "").lower().strip()
         lang_prim = str(meta.get("language_primary") or "").strip().title()
 
+        _ai_vs = meta.get("accept_issues_vs") or {}
+        _ai_bo = meta.get("accept_issues_bodhan") or {}
+        _issues_vs   = _ai_vs.get("issues", []) if isinstance(_ai_vs, dict) else []
+        _issues_bo   = _ai_bo.get("issues", []) if isinstance(_ai_bo, dict) else []
+        _pages_vs    = _ai_vs.get("page_num", []) if isinstance(_ai_vs, dict) else []
+        _pages_bo    = _ai_bo.get("page_num", []) if isinstance(_ai_bo, dict) else []
+        _reject_raw  = str(meta.get("reject_stage") or "null").lower().strip()
+        _review_raw  = str(meta.get("review_flag")  or "pending").lower().strip()
+
         rows.append({
             "student_name":          str(meta.get("student_name") or "not mentioned").strip(),
             "student_id":            str(meta.get("student_id")   or ""),
@@ -691,6 +752,12 @@ def load_bucket_data(exact_pages: bool = False) -> pd.DataFrame:
             "rotation":              str(meta.get("rotation")       or "").lower().strip(),
             "distributor":           (lambda v: v.split("@")[0].strip() if "@" in v else v)(str(meta.get("distributor") or meta.get("uploaded_by") or meta.get("collector_name") or meta.get("data_collector") or "Not Mentioned").strip()),
             "pdf_key":               pdf_key,
+            "reject_stage":          _reject_raw,
+            "review_flag":           _review_raw,
+            "issues_vs":             _issues_vs,
+            "issues_bodhan":         _issues_bo,
+            "flagged_pages_vs":      _pages_vs,
+            "flagged_pages_bodhan":  _pages_bo,
         })
 
     if cache_dirty:
@@ -819,6 +886,13 @@ for _col in ("handwritten_or_handdrawn", "printed", "mixed_content", "rotation")
     if _col not in df.columns:
         df[_col] = ""
 
+for _col in ("reject_stage", "review_flag"):
+    if _col not in df.columns:
+        df[_col] = "null" if _col == "reject_stage" else "pending"
+for _col in ("issues_vs", "issues_bodhan", "flagged_pages_vs", "flagged_pages_bodhan"):
+    if _col not in df.columns:
+        df[_col] = [[] for _ in range(len(df))]
+
 # Re-apply board normalisation in case parquet was built before current BOARD_MAP
 _board_valid = set(BOARD_MAP.values())
 _b = df["board"].str.lower().str.strip()
@@ -845,6 +919,24 @@ def _remap_subject(val: str) -> str:
 
 df["subject"] = df["subject"].apply(_remap_subject)
 df["subject_category"] = df["subject"].map(SUBJ_CAT_MAP).fillna("Other")
+
+# ── Derive quality_status from reject_stage / review_flag / issues ────────────
+def _quality_status(row) -> str:
+    rs = str(row.get("reject_stage", "null")).lower().strip()
+    if rs in ("reject_stage_vs",):
+        return "Rejected (VS)"
+    if rs in ("reject_stage_bodhan",):
+        return "Rejected (Bodhan)"
+    iv = row.get("issues_vs") or []
+    ib = row.get("issues_bodhan") or []
+    if iv or ib:
+        return "Accepted w/ Issues"
+    rv = str(row.get("review_flag", "pending")).lower().strip()
+    if "stage_vs" in rv or "stage_bodhan" in rv:
+        return "Clean"
+    return "Pending"
+
+df["quality_status"] = df.apply(_quality_status, axis=1)
 
 # LANGUAGE_SPECIFIC_TARGETS is defined as a constant above (no external file needed)
 
@@ -920,21 +1012,7 @@ _chart_text = _text2 if _dark else _text   # mirrors make_chart_layout logic
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 
-NAV_SECTIONS = [
-    "Overview",
-    "Phase 1 Targets vs Achieved",
-    "State Level Analysis",
-    "District Level Analysis",
-    "Block-Level Analysis",
-    "School Statistics",
-    "Class & Subject Analysis",
-    "Subject & Gender Coverage by Class Level",
-    "Student Multi-Subject Coverage",
-    "Pages per Record Distribution",
-    "Content Quality",
-    "Distributor Stats",
-    "Raw Data Explorer",
-]
+
 
 _days_left = (pd.Timestamp("2026-05-31", tz="Asia/Kolkata") - pd.Timestamp.now(tz="Asia/Kolkata")).days
 
@@ -960,23 +1038,17 @@ with st.sidebar:
         st.session_state["exact_pages"] = True
         st.rerun()
     
-    dropdown_links = "".join([f'<a href="#{s.lower().replace(" ", "-").replace("&", "and")}">{s}</a>' for s in NAV_SECTIONS])
-    st.html(f"""
-    <div class="st-jump-menu">
-        <div class="st-jump-btn">Jump to Section...</div>
-        <div class="st-jump-content">
-            {dropdown_links}
-        </div>
-    </div>
-    """)
+
     st.markdown("---")
 
     sel_board  = st.selectbox("Board", ["All"] + sorted(df["board"].unique().tolist()))
     sel_level  = st.selectbox("Class Level", ["All"] + sorted(df["class_level"].unique().tolist()))
     sel_subj   = st.selectbox("Subject Category", ["All"] + sorted(df["subject_category"].unique().tolist()))
     sel_gender = st.selectbox("Gender", ["All"] + sorted(df["gender"].unique().tolist()))
+    sel_lang   = st.selectbox("Language", ["All"] + sorted([l for l in df["regional_language"].unique().tolist() if l and l != "Unknown"]))
     sel_state  = st.selectbox("State", ["All"] + sorted([s for s in df["state"].unique().tolist() if s and s != "Unknown"]))
     sel_block  = st.selectbox("Block", ["All"] + sorted(df["block"].unique().tolist()))
+    sel_school = st.selectbox("School", ["All"] + sorted([s for s in df["school_name"].unique().tolist() if s]))
 
     st.markdown("---")
     st.markdown("**Date Range**")
@@ -993,7 +1065,8 @@ with st.sidebar:
 filtered = df.copy()
 for col, val in [("board", sel_board), ("class_level", sel_level),
                   ("subject_category", sel_subj), ("gender", sel_gender),
-                  ("state", sel_state), ("block", sel_block)]:
+                  ("regional_language", sel_lang), ("state", sel_state),
+                  ("block", sel_block), ("school_name", sel_school)]:
     if val != "All":
         filtered = filtered[filtered[col] == val]
 
@@ -1016,7 +1089,7 @@ if "show_summary" not in st.session_state:
 _header_col, _btn_col = st.columns([8, 2])
 with _header_col:
     st.html("""
-<div style="padding: 8px 0 4px 0;">
+<div style="margin-top: -16px; padding-bottom: 4px;">
     <div class="dashboard-title">OCR-VS Dashboard</div>
     <div class="dashboard-subtitle">
         Real-time tracking &amp; monitoring of handwriting data collection across schools.
@@ -1060,12 +1133,22 @@ div[data-testid="stButton"]:has(button[key="toggle_summary"]) button {{
     transition: all 0.2s ease !important; text-shadow: 0 1px 3px rgba(0,0,0,0.3) !important;
 }}
 div[data-testid="stButton"]:has(button[key="toggle_sample_checker"]) button:hover,
-div[data-testid="stButton"]:has(button[key="toggle_summary"]) button:hover {{
+div[data-testid="stButton"]:has(button[key="toggle_summary"]) button:hover,
+div[data-testid="stButton"]:has(button[key="toggle_theme"]) button:hover {{
     filter: brightness(1.12) !important; transform: translateY(-2px) !important;
+}}
+div[data-testid="stButton"]:has(button[key="toggle_theme"]) button {{
+    background: {_bg2} !important;
+    border: 1px solid {_border_card} !important;
+    color: {_text} !important;
+    font-weight: 700 !important; font-size: 0.85rem !important;
+    letter-spacing: 0.03em !important; border-radius: 12px !important;
+    padding: 10px 16px !important; box-shadow: 0 4px 20px rgba(0,0,0,0.05) !important;
+    transition: all 0.2s ease !important;
 }}
 </style>
 """, unsafe_allow_html=True)
-    _b1, _b2 = st.columns(2)
+    _b1, _b2, _b3 = st.columns([2, 2, 1])
     with _b1:
         if st.button(_sm_label, key="toggle_summary", use_container_width=True):
             st.session_state["show_summary"] = not _sum_open
@@ -1075,6 +1158,10 @@ div[data-testid="stButton"]:has(button[key="toggle_summary"]) button:hover {{
         if st.button(_sc_label, key="toggle_sample_checker", use_container_width=True):
             st.session_state["show_sample_checker"] = not _sc_open
             st.session_state["show_summary"] = False
+            st.rerun()
+    with _b3:
+        if st.button(_theme_icon, key="toggle_theme", help="Toggle dark / light mode", use_container_width=True):
+            st.session_state["dark_mode"] = not _dark
             st.rerun()
 
 # ── Sample Checker Panel ──────────────────────────────────────────────────────
@@ -1180,7 +1267,7 @@ if st.session_state["show_sample_checker"]:
     if _sel_sc_class != "All":
         _sc_df = _sc_df[_sc_df["class"] == int(_sel_sc_class)]
 
-    _sc_fa, _sc_fb, _sc_fc, _ = st.columns([1, 1, 1, 1])
+    _sc_fa, _sc_fb, _sc_fc, _sc_fd = st.columns([1, 1, 1, 1])
     _sc_dates = _sc_df["date"].dropna()
     _sc_min = _sc_dates.min().date() if len(_sc_dates) else pd.Timestamp("2024-01-01").date()
     _sc_max = _sc_dates.max().date() if len(_sc_dates) else pd.Timestamp.now().date()
@@ -1196,6 +1283,21 @@ if st.session_state["show_sample_checker"]:
     _sel_sc_name = _sc_fc.selectbox("Student Name", _name_opts, key="sc_name")
     if _sel_sc_name != "All":
         _sc_df = _sc_df[_sc_df["student_name"].str.title() == _sel_sc_name]
+
+    # Quality status filter (honours deeplink preset from Quality Analysis panel)
+    _quality_status_opts = ["All", "Pending", "Clean", "Accepted w/ Issues", "Rejected (VS)", "Rejected (Bodhan)"]
+    _preset = st.session_state.pop("sc_quality_preset", None)
+    _preset_map = {"rejected": "Rejected (VS)", "flagged": "Accepted w/ Issues"}
+    _quality_default = _preset_map.get(_preset, "All")
+    _quality_default_idx = _quality_status_opts.index(_quality_default) if _quality_default in _quality_status_opts else 0
+    _sel_sc_quality = _sc_fd.selectbox(
+        "Quality Status", _quality_status_opts,
+        index=_quality_default_idx, key="sc_quality",
+    )
+    if _sel_sc_quality == "Rejected (VS)" or _sel_sc_quality == "Rejected (Bodhan)":
+        _sc_df = _sc_df[_sc_df["quality_status"] == _sel_sc_quality]
+    elif _sel_sc_quality != "All":
+        _sc_df = _sc_df[_sc_df["quality_status"] == _sel_sc_quality]
 
     n_total = len(_sc_df)
     _SC_PAGE_SIZE = 10
@@ -1233,46 +1335,185 @@ if st.session_state["show_sample_checker"]:
             _pdf_close_col, _ = st.columns([1, 8])
             if _pdf_close_col.button("✕", key="sc_pdf_close", help="Close PDF"):
                 st.session_state["sc_view_idx"] = None
+                st.session_state["sc_jump_page"] = None
                 st.rerun()
+            # Load JSON metadata to embed inside the details card
+            _json_section = ""
+            try:
+                _json_key = _pdf_key_val.rsplit(".", 1)[0] + ".json"
+                _s3_client = _s3()
+                _json_obj = _s3_client.get_object(Bucket=MINIO_BUCKET, Key=_json_key)
+                _json_data_raw = _json.loads(_json_obj["Body"].read())
+
+                def _flatten_json(obj, prefix=""):
+                    """Flatten nested JSON into a list of (label, value) pairs."""
+                    items = []
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            full_key = f"{prefix} · {k}" if prefix else k
+                            if isinstance(v, (dict, list)):
+                                items.extend(_flatten_json(v, full_key))
+                            else:
+                                items.append((full_key, v))
+                    elif isinstance(obj, list):
+                        for i, v in enumerate(obj):
+                            full_key = f"{prefix}[{i}]"
+                            if isinstance(v, (dict, list)):
+                                items.extend(_flatten_json(v, full_key))
+                            else:
+                                items.append((full_key, v))
+                    return items
+
+                # Keys already shown in the top card — skip to avoid duplication
+                _SKIP_JSON_KEYS = {
+                    "student_name", "gender", "grade", "class", "school_name",
+                    "district", "block", "subject", "source_type", "sample_type",
+                    "num_pages", "pages",
+                }
+                _json_tiles = "".join(
+                    f"<div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;"
+                    f"letter-spacing:.07em;word-break:break-word;'>{str(lbl).replace('_',' ').title()}</div>"
+                    f"<div style='font-size:0.82rem;font-weight:600;color:{_text3};word-break:break-word;'>"
+                    f"{str(val).title() if val not in (None, '') else '—'}</div></div>"
+                    for lbl, val in _flatten_json(_json_data_raw)
+                    if lbl.lower() not in _SKIP_JSON_KEYS
+                )
+                _json_section = f"""
+<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px;
+            padding-top:8px;border-top:1px solid {_border_card};'>
+  {_json_tiles}
+</div>"""
+            except Exception as _je:
+                _json_section = f"<div style='margin-top:6px;font-size:0.65rem;color:{_error_color};'>Could not load JSON metadata: {_je}</div>"
+
+            # ── Build quality banner for this record ──────────────────────
+            _row_qs      = str(_sc_row.get("quality_status", "Pending"))
+            _row_issues  = list(_sc_row.get("issues_vs") or []) + list(_sc_row.get("issues_bodhan") or [])
+            _row_fp_vs   = list(_sc_row.get("flagged_pages_vs") or [])
+            _row_fp_bo   = list(_sc_row.get("flagged_pages_bodhan") or [])
+            _row_fp_all  = sorted(set([int(p) for p in (_row_fp_vs + _row_fp_bo)
+                                       if isinstance(p, (int, float))]))
+
+            _qs_colors = {
+                "Clean":             ("#34D399", "rgba(52,211,153,0.1)"),
+                "Accepted w/ Issues":("#FBBF24", "rgba(251,191,36,0.1)"),
+                "Rejected (VS)":     ("#F43F5E", "rgba(244,63,94,0.1)"),
+                "Rejected (Bodhan)": ("#FB923C", "rgba(251,146,60,0.1)"),
+                "Pending":           ("#6B7280", "rgba(107,114,128,0.1)"),
+            }
+            _qs_c, _qs_bg = _qs_colors.get(_row_qs, ("#6B7280", "rgba(107,114,128,0.1)"))
+
+            _issue_chips_html = ""
+            if _row_issues:
+                _issue_chips_html = "<div style='display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;'>" + "".join(
+                    f"<span style='background:{_qs_bg};color:{_qs_c};font-size:0.65rem;font-weight:600;"
+                    f"padding:2px 8px;border-radius:8px;border:1px solid {_qs_c}44;'>"
+                    f"{str(i).replace('_',' ').title()}</span>"
+                    for i in dict.fromkeys(_row_issues)
+                ) + "</div>"
+
+            _fp_label_html = ""
+            if _row_fp_vs:
+                _fp_label_html += f"<span style='font-size:0.62rem;color:{_text2};'>VS: </span>" + " ".join(
+                    f"<span style='background:rgba(244,63,94,0.15);color:#F43F5E;font-size:0.62rem;"
+                    f"padding:1px 6px;border-radius:6px;border:1px solid rgba(244,63,94,0.3);'>p.{p}</span>"
+                    for p in [int(x) for x in _row_fp_vs if isinstance(x, (int, float))]
+                )
+            if _row_fp_bo:
+                if _fp_label_html:
+                    _fp_label_html += "&nbsp;&nbsp;"
+                _fp_label_html += f"<span style='font-size:0.62rem;color:{_text2};'>Bodhan: </span>" + " ".join(
+                    f"<span style='background:rgba(251,146,60,0.15);color:#FB923C;font-size:0.62rem;"
+                    f"padding:1px 6px;border-radius:6px;border:1px solid rgba(251,146,60,0.3);'>p.{p}</span>"
+                    for p in [int(x) for x in _row_fp_bo if isinstance(x, (int, float))]
+                )
+
+            _quality_banner = ""
+            if _row_qs != "Pending":
+                _quality_banner = f"""
+<div style='background:{_qs_bg};border:1px solid {_qs_c}44;border-radius:10px;
+            padding:10px 14px;margin-bottom:8px;'>
+  <div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;'>
+    <span style='background:{_qs_c};color:{"#000" if _row_qs in ("Clean","Accepted w/ Issues") else "#fff"};
+                 font-size:0.65rem;font-weight:700;padding:2px 10px;border-radius:10px;'>{_row_qs}</span>
+    {_fp_label_html}
+  </div>
+  {_issue_chips_html}
+</div>"""
+
+            st.markdown(_quality_banner, unsafe_allow_html=True)
+
             st.markdown(f"""
 <div style='background:{_bg2};border:1px solid {_border_card};
-     border-radius:10px;padding:10px 16px;margin:10px 0;
-     display:grid;grid-template-columns:repeat(4,1fr);gap:8px;'>
-  <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Student</div>
-       <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["student_name"]).title()}</div></div>
-  <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Class · Subject</div>
-       <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>Class {_cls_v} · {str(_sc_row["subject"]).title()}</div></div>
-  <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>School</div>
-       <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["school_name"]).title()}</div></div>
-  <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>District · Block</div>
-       <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{_sc_row["district"]} · {str(_sc_row["block"]).title()}</div></div>
-  <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Gender</div>
-       <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["gender"]).title()}</div></div>
-  <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Pages</div>
-       <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{int(_sc_row["num_pages"])}</div></div>
-  <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Date</div>
-       <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["date"])[:10] if pd.notna(_sc_row["date"]) else "—"}</div></div>
-  <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Sample Type</div>
-       <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["sample_type"]).title()}</div></div>
+     border-radius:10px;padding:10px 16px;margin:0 0 10px;'>
+  <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:8px;'>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Student</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["student_name"]).title()}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Class</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{_cls_v}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Subject</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["subject"]).title()}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>School</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["school_name"]).title()}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>District</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{_sc_row["district"]}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Block</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["block"]).title()}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Gender</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["gender"]).title()}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Pages</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{int(_sc_row["num_pages"])}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Date</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["date"])[:10] if pd.notna(_sc_row["date"]) else "—"}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Sample Type</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["sample_type"]).title()}</div></div>
+  </div>
+  {_json_section}
 </div>
 """, unsafe_allow_html=True)
 
             with st.spinner("Fetching file…"):
                 _pdf_url, _pdf_err, _found_ext = _presigned_url(_pdf_key_val, expires=1800)
 
+            # ── Jump-to-page controls (flagged pages) ─────────────────────
+            if "sc_jump_page" not in st.session_state:
+                st.session_state["sc_jump_page"] = None
+            _jump_page = st.session_state.get("sc_jump_page")
+
+            if _pdf_url and _found_ext == "pdf" and _row_fp_all:
+                st.markdown(f"""
+<div style='display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px;'>
+  <span style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;
+               letter-spacing:0.07em;'>Jump to flagged page:</span>""",
+                    unsafe_allow_html=True)
+                _jp_cols = st.columns(min(len(_row_fp_all), 10))
+                for _jci, _jpage in enumerate(_row_fp_all[:10]):
+                    if _jp_cols[_jci].button(f"p.{_jpage}", key=f"jp_{_view_idx}_{_jpage}"):
+                        st.session_state["sc_jump_page"] = _jpage
+                        _jump_page = _jpage
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            _pdf_src = _pdf_url
+            if _jump_page and _pdf_url and _found_ext == "pdf":
+                _pdf_src = f"{_pdf_url}#page={_jump_page}"
+
             if _pdf_url and _found_ext == "pdf":
                 st.markdown(f"""
 <div style='background:{_bg3};border:1px solid {_border_card};
-     border-radius:12px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.15);'>
+     border-radius:12px;overflow:hidden;box-shadow:0 8px 32px {_shadow};'>
   <div style='background:{_bg2};padding:8px 14px;display:flex;
        align-items:center;justify-content:space-between;border-bottom:1px solid {_border2};'>
-    <span style='font-size:0.75rem;font-weight:600;color:{_text2};'>📄 {_pdf_key_val.split("/")[-1]}</span>
+    <span style='font-size:0.75rem;font-weight:600;color:{_text2};'>
+      📄 {_pdf_key_val.split("/")[-1]}
+      {"&nbsp;&nbsp;<span style='color:#FBBF24;font-size:0.7rem;'>→ p." + str(_jump_page) + "</span>" if _jump_page else ""}
+    </span>
     <a href="{_pdf_url}" target="_blank"
-       style='font-size:0.72rem;color:#818CF8;text-decoration:none;font-weight:600;
-              background:rgba(129,140,248,0.1);padding:3px 10px;border-radius:6px;
-              border:1px solid rgba(129,140,248,0.3);'>↗ Open full screen</a>
+       style='font-size:0.72rem;color:{_accent};text-decoration:none;font-weight:600;
+              background:{_accent_bg};padding:3px 10px;border-radius:6px;
+              border:1px solid {_accent_border};'>↗ View Full PDF</a>
   </div>
-  <iframe src="{_pdf_url}" width="100%" height="900"
+  <iframe src="{_pdf_src}" width="100%" height="900"
           style="border:none;display:block;background:#fff;"></iframe>
 </div>
 """, unsafe_allow_html=True)
@@ -1280,14 +1521,14 @@ if st.session_state["show_sample_checker"]:
                 st.warning(f"PDF not available — showing image file (.{_found_ext}) instead.")
                 st.markdown(f"""
 <div style='background:{_bg3};border:1px solid {_border_card};
-     border-radius:12px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.15);'>
+     border-radius:12px;overflow:hidden;box-shadow:0 8px 32px {_shadow};'>
   <div style='background:{_bg2};padding:8px 14px;display:flex;
        align-items:center;justify-content:space-between;border-bottom:1px solid {_border2};'>
     <span style='font-size:0.75rem;font-weight:600;color:{_text2};'>🖼 {_pdf_key_val.split("/")[-1].replace(".pdf", f".{_found_ext}")}</span>
     <a href="{_pdf_url}" target="_blank"
-       style='font-size:0.72rem;color:#818CF8;text-decoration:none;font-weight:600;
-              background:rgba(129,140,248,0.1);padding:3px 10px;border-radius:6px;
-              border:1px solid rgba(129,140,248,0.3);'>↗ Open full screen</a>
+       style='font-size:0.72rem;color:{_accent};text-decoration:none;font-weight:600;
+              background:{_accent_bg};padding:3px 10px;border-radius:6px;
+              border:1px solid {_accent_border};'>↗ View Full Image</a>
   </div>
   <img src="{_pdf_url}" style="width:100%;display:block;background:#fff;" />
 </div>
@@ -1300,8 +1541,8 @@ if st.session_state["show_sample_checker"]:
             st.markdown(f"<div style='height:1px;background:{_border_card};margin:16px 0 12px;'></div>", unsafe_allow_html=True)
 
         # ── Paginated table ────────────────────────────────────────────────
-        _tbl_cols = ["#", "Student", "Class", "Subject", "Pages", "School", "District", "Date", ""]
-        _col_widths = [0.4, 1.2, 0.5, 1, 0.4, 1.4, 1, 0.7, 0.5]
+        _tbl_cols   = ["#", "Student", "Cls", "Subject", "Pgs", "Status", "Flagged Pgs", "Date", ""]
+        _col_widths = [0.3, 1.1, 0.4, 0.9, 0.35, 0.9, 1.2, 0.65, 0.45]
         _hdr_cols = st.columns(_col_widths)
         for _ci, _ch in enumerate(_tbl_cols):
             _hdr_cols[_ci].markdown(
@@ -1310,21 +1551,52 @@ if st.session_state["show_sample_checker"]:
                 unsafe_allow_html=True)
         st.markdown(f"<div style='height:1px;background:{_border_card};margin-bottom:4px;'></div>", unsafe_allow_html=True)
 
+        _STATUS_BADGE = {
+            "Clean":             ("<span style='background:#34D399;color:#000;font-size:0.6rem;font-weight:700;"
+                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>✓ Clean</span>"),
+            "Accepted w/ Issues":("<span style='background:#FBBF24;color:#000;font-size:0.6rem;font-weight:700;"
+                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>⚠ Issues</span>"),
+            "Rejected (VS)":     ("<span style='background:#F43F5E;color:#fff;font-size:0.6rem;font-weight:700;"
+                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>✕ Rej VS</span>"),
+            "Rejected (Bodhan)": ("<span style='background:#FB923C;color:#fff;font-size:0.6rem;font-weight:700;"
+                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>✕ Rej Bo</span>"),
+            "Pending":           ("<span style='background:#6B7280;color:#fff;font-size:0.6rem;font-weight:700;"
+                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>… Pending</span>"),
+        }
+
         for _abs_i, _r in zip(range(_page_start, _page_start + len(_page_rows)), _page_rows.iterrows()):
             _r = _r[1]  # iterrows yields (index, Series)
             _rc = st.columns(_col_widths)
             _cl  = int(_r["class"]) if _r["class"] and not pd.isna(_r["class"]) else "?"
             _dt  = str(_r["date"])[:10] if pd.notna(_r["date"]) else "—"
-            _rc[0].markdown(f"<div style='font-size:0.78rem;color:{_text2};padding:6px 0;'>{_abs_i+1}</div>", unsafe_allow_html=True)
-            _rc[1].markdown(f"<div style='font-size:0.78rem;color:{_text3};font-weight:600;padding:6px 0;'>{str(_r['student_name']).title()}</div>", unsafe_allow_html=True)
-            _rc[2].markdown(f"<div style='font-size:0.78rem;color:{_text3};padding:6px 0;'>{_cl}</div>", unsafe_allow_html=True)
-            _rc[3].markdown(f"<div style='font-size:0.78rem;color:{_text3};padding:6px 0;'>{str(_r['subject']).title()}</div>", unsafe_allow_html=True)
-            _rc[4].markdown(f"<div style='font-size:0.78rem;color:{_text3};padding:6px 0;'>{int(_r['num_pages'])}</div>", unsafe_allow_html=True)
-            _rc[5].markdown(f"<div style='font-size:0.78rem;color:{_text3};padding:6px 0;'>{str(_r['school_name']).title()}</div>", unsafe_allow_html=True)
-            _rc[6].markdown(f"<div style='font-size:0.78rem;color:{_text3};padding:6px 0;'>{str(_r['district']).title()}</div>", unsafe_allow_html=True)
-            _rc[7].markdown(f"<div style='font-size:0.78rem;color:{_text2};padding:6px 0;'>{_dt}</div>", unsafe_allow_html=True)
+            _qs  = str(_r.get("quality_status", "Pending"))
+            _badge_html = _STATUS_BADGE.get(_qs, _STATUS_BADGE["Pending"])
+
+            _fp_vs  = _r.get("flagged_pages_vs")  or []
+            _fp_bo  = _r.get("flagged_pages_bodhan") or []
+            _fp_all = sorted(set([int(p) for p in (_fp_vs + _fp_bo) if isinstance(p, (int, float))]))
+            if _fp_all:
+                _pg_chips = " ".join(
+                    f"<span style='background:rgba(251,191,36,0.18);color:#FBBF24;font-size:0.58rem;"
+                    f"padding:1px 5px;border-radius:6px;border:1px solid rgba(251,191,36,0.35);'>p.{p}</span>"
+                    for p in _fp_all[:8]
+                )
+                if len(_fp_all) > 8:
+                    _pg_chips += f"<span style='font-size:0.58rem;color:{_text2};'> +{len(_fp_all)-8}</span>"
+            else:
+                _pg_chips = f"<span style='color:{_text2};font-size:0.65rem;'>—</span>"
+
+            _rc[0].markdown(f"<div style='font-size:0.75rem;color:{_text2};padding:7px 0;'>{_abs_i+1}</div>", unsafe_allow_html=True)
+            _rc[1].markdown(f"<div style='font-size:0.75rem;color:{_text3};font-weight:600;padding:7px 0;'>{str(_r['student_name']).title()}</div>", unsafe_allow_html=True)
+            _rc[2].markdown(f"<div style='font-size:0.75rem;color:{_text3};padding:7px 0;'>{_cl}</div>", unsafe_allow_html=True)
+            _rc[3].markdown(f"<div style='font-size:0.75rem;color:{_text3};padding:7px 0;'>{str(_r['subject']).title()}</div>", unsafe_allow_html=True)
+            _rc[4].markdown(f"<div style='font-size:0.75rem;color:{_text3};padding:7px 0;'>{int(_r['num_pages'])}</div>", unsafe_allow_html=True)
+            _rc[5].markdown(f"<div style='padding:5px 0;'>{_badge_html}</div>", unsafe_allow_html=True)
+            _rc[6].markdown(f"<div style='padding:5px 0;line-height:1.6;'>{_pg_chips}</div>", unsafe_allow_html=True)
+            _rc[7].markdown(f"<div style='font-size:0.75rem;color:{_text2};padding:7px 0;'>{_dt}</div>", unsafe_allow_html=True)
             if _rc[8].button("View", key=f"sc_view_{_abs_i}", use_container_width=True):
                 st.session_state["sc_view_idx"] = _abs_i
+                st.session_state["sc_jump_page"] = None
                 st.rerun()
             st.markdown(f"<div style='height:1px;background:{_border2};'></div>", unsafe_allow_html=True)
 
@@ -1430,139 +1702,386 @@ if not st.session_state.get("show_summary"):
 </div>
 """, unsafe_allow_html=True)
 
-    # 4 overview cards
+    # ── Left / Right split: Collection | Quality Analysis ──
     _n_subj_unique = filtered["subject"].nunique()
-    _c1, _c2, _c3, _c4 = st.columns(4)
+    _col_left, _col_sep, _col_right = st.columns([1, 0.02, 1], gap="small")
 
-    # ── States card ──
-    with _c1:
-        _state_rows = (
-            filtered[~filtered["state"].isin(["Not Mentioned", "Unknown", ""])]
-            .groupby("state")
-            .agg(Districts=("district", "nunique"), Blocks=("block", "nunique"))
-            .reset_index()
-            .rename(columns={"state": "State"})
-            .sort_values("State")
-        )
+    # ════════════════════════════════════════════════════════
+    # LEFT — COLLECTION
+    # ════════════════════════════════════════════════════════
+    with _col_left:
         st.markdown(f"""
+<div style='font-size:0.72rem;font-weight:700;color:#818CF8;text-transform:uppercase;
+            letter-spacing:0.12em;margin-bottom:12px;display:flex;align-items:center;gap:8px;'>
+  <span style='display:inline-block;width:4px;height:16px;background:#818CF8;border-radius:3px;'></span>
+  Collection
+</div>""", unsafe_allow_html=True)
+
+        _c1, _c2 = st.columns(2)
+
+        # ── States card ──
+        with _c1:
+            _state_rows = (
+                filtered[~filtered["state"].isin(["Not Mentioned", "Unknown", ""])]
+                .groupby("state")
+                .agg(Districts=("district", "nunique"), Blocks=("block", "nunique"), Pages=("num_pages", "sum"))
+                .reset_index()
+                .rename(columns={"state": "State"})
+                .sort_values("Pages", ascending=True)
+            )
+            st.markdown(f"""
 <div style='background:rgba(129,140,248,0.08);border:1px solid rgba(129,140,248,0.2);
-            border-radius:14px;padding:16px 18px 10px;margin-bottom:4px;'>
-  <div style='font-size:0.7rem;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>States</div>
-  <div style='font-size:2rem;font-weight:900;color:{_text};line-height:1;'>{n_states}</div>
-  <div style='font-size:0.75rem;color:{_text3};margin-top:2px;'>{n_districts} districts · {n_blocks} blocks</div>
+            border-radius:14px;padding:14px 16px 10px;margin-bottom:6px;'>
+  <div style='font-size:0.65rem;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>States</div>
+  <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{n_states}</div>
+  <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>{n_districts} districts · {n_blocks} blocks</div>
 </div>""", unsafe_allow_html=True)
-        st.dataframe(
-            _state_rows,
-            hide_index=True, use_container_width=True, height=min(180, 36 + len(_state_rows) * 35),
-            column_config={
-                "State":     st.column_config.TextColumn("State"),
-                "Districts": st.column_config.NumberColumn("Dist.", format="%d"),
-                "Blocks":    st.column_config.NumberColumn("Blocks", format="%d"),
-            },
-        )
-        # State selector + Detailed Stats button
-        _avail_states = sorted(_state_rows["State"].tolist())
-        if "state_detail_open" not in st.session_state:
-            st.session_state["state_detail_open"] = None
-        _sel_state_detail = st.selectbox(
-            "Select state", ["— select a state —"] + _avail_states,
-            key="state_detail_select", label_visibility="collapsed",
-        )
-        _state_detail_btn = st.button(
-            "📊 Detailed Stats →", key="state_detail_btn",
-            disabled=(_sel_state_detail == "— select a state —"),
-            use_container_width=True,
-        )
-        if _state_detail_btn and _sel_state_detail != "— select a state —":
-            st.session_state["state_detail_open"] = _sel_state_detail
-            st.rerun()
+            if not _state_rows.empty:
+                _fig_states = go.Figure(go.Bar(
+                    x=_state_rows["Pages"],
+                    y=_state_rows["State"],
+                    orientation="h",
+                    marker_color="#818CF8",
+                    text=[f"{int(v):,}" for v in _state_rows["Pages"]],
+                    textposition="outside",
+                    textfont=dict(size=10, color=_chart_text),
+                ))
+                _fig_states.update_layout(**chart_layout(height=160 + len(_state_rows) * 28))
+                _fig_states.update_layout(margin=dict(l=0, r=40, t=4, b=4))
+                _fig_states.update_xaxes(visible=False)
+                _fig_states.update_yaxes(tickfont=dict(size=11))
+                st.plotly_chart(_fig_states, use_container_width=True, config={"displayModeBar": False})
+            _avail_states = sorted(_state_rows["State"].tolist())
+            if "state_detail_open" not in st.session_state:
+                st.session_state["state_detail_open"] = None
+            _sel_state_detail = st.selectbox(
+                "Select state", ["— select a state —"] + _avail_states,
+                key="state_detail_select", label_visibility="collapsed",
+            )
+            _state_detail_btn = st.button(
+                "📊 Detailed Stats →", key="state_detail_btn",
+                disabled=(_sel_state_detail == "— select a state —"),
+                use_container_width=True,
+            )
+            if _state_detail_btn and _sel_state_detail != "— select a state —":
+                st.session_state["state_detail_open"] = _sel_state_detail
+                st.rerun()
 
-    # ── Subjects card ──
-    with _c2:
-        _subj_rows = (
-            filtered.groupby("subject")["num_pages"]
-            .sum().sort_values(ascending=False)
-            .reset_index()
-            .rename(columns={"subject": "Subject", "num_pages": "Pages"})
-        )
-        st.markdown(f"""
+        # ── Subjects card ──
+        with _c2:
+            _subj_rows = (
+                filtered.groupby("subject")["num_pages"]
+                .sum().sort_values(ascending=True)
+                .reset_index()
+                .rename(columns={"subject": "Subject", "num_pages": "Pages"})
+            )
+            st.markdown(f"""
 <div style='background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.2);
-            border-radius:14px;padding:16px 18px 10px;margin-bottom:4px;'>
-  <div style='font-size:0.7rem;font-weight:700;color:#34D399;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Subjects</div>
-  <div style='font-size:2rem;font-weight:900;color:{_text};line-height:1;'>{_n_subj_unique}</div>
-  <div style='font-size:0.75rem;color:{_text3};margin-top:2px;'>{int(filtered["num_pages"].sum()):,} total pages</div>
+            border-radius:14px;padding:14px 16px 10px;margin-bottom:6px;'>
+  <div style='font-size:0.65rem;font-weight:700;color:#34D399;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Subjects</div>
+  <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{_n_subj_unique}</div>
+  <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>{int(filtered["num_pages"].sum()):,} total pages</div>
 </div>""", unsafe_allow_html=True)
-        st.dataframe(
-            _subj_rows,
-            hide_index=True, use_container_width=True, height=min(180, 36 + len(_subj_rows) * 35),
-            column_config={
-                "Subject": st.column_config.TextColumn("Subject"),
-                "Pages":   st.column_config.NumberColumn("Pages", format="%d"),
-            },
-        )
-        if "subject_detail_open" not in st.session_state:
-            st.session_state["subject_detail_open"] = False
-        if st.button("📊 Detailed Stats →", key="subj_detail_btn", use_container_width=True):
-            st.session_state["subject_detail_open"] = not st.session_state["subject_detail_open"]
-            st.rerun()
+            if not _subj_rows.empty:
+                _fig_subj = go.Figure(go.Bar(
+                    x=_subj_rows["Pages"],
+                    y=_subj_rows["Subject"].str.title(),
+                    orientation="h",
+                    marker_color="#34D399",
+                    text=[f"{int(v):,}" for v in _subj_rows["Pages"]],
+                    textposition="outside",
+                    textfont=dict(size=10, color=_chart_text),
+                ))
+                _fig_subj.update_layout(**chart_layout(height=160 + len(_subj_rows) * 28))
+                _fig_subj.update_layout(margin=dict(l=0, r=40, t=4, b=4))
+                _fig_subj.update_xaxes(visible=False)
+                _fig_subj.update_yaxes(tickfont=dict(size=11))
+                st.plotly_chart(_fig_subj, use_container_width=True, config={"displayModeBar": False})
+            if "subject_detail_open" not in st.session_state:
+                st.session_state["subject_detail_open"] = False
+            if st.button("📊 Detailed Stats →", key="subj_detail_btn", use_container_width=True):
+                st.session_state["subject_detail_open"] = not st.session_state["subject_detail_open"]
+                st.rerun()
 
-    # ── Students card ──
-    with _c3:
-        _gender_rows = (
-            filtered.groupby("gender")["student_id"]
-            .nunique().reset_index()
-            .rename(columns={"gender": "Gender", "student_id": "Students"})
-            .sort_values("Students", ascending=False)
-        )
-        st.markdown(f"""
+        _c3, _c4 = st.columns(2)
+
+        # ── Students card ──
+        with _c3:
+            _class_page_rows = (
+                filtered[filtered["class"].notna()]
+                .groupby("class")["num_pages"]
+                .sum().reset_index()
+                .rename(columns={"class": "Class", "num_pages": "Pages"})
+                .sort_values("Class")
+            )
+            _class_page_rows["Class"] = _class_page_rows["Class"].astype(int)
+            st.markdown(f"""
 <div style='background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);
-            border-radius:14px;padding:16px 18px 10px;margin-bottom:4px;'>
-  <div style='font-size:0.7rem;font-weight:700;color:#FBBF24;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Students</div>
-  <div style='font-size:2rem;font-weight:900;color:{_text};line-height:1;'>{n_students:,}</div>
-  <div style='font-size:0.75rem;color:{_text3};margin-top:2px;'>{n_schools} schools · {round(n_students/n_schools,1) if n_schools else 0} avg/school</div>
+            border-radius:14px;padding:14px 16px 10px;margin-bottom:6px;'>
+  <div style='font-size:0.65rem;font-weight:700;color:#FBBF24;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Students</div>
+  <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{n_students:,}</div>
+  <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>{n_schools} schools · {round(n_students/n_schools,1) if n_schools else 0} avg/school</div>
 </div>""", unsafe_allow_html=True)
-        st.dataframe(
-            _gender_rows,
-            hide_index=True, use_container_width=True, height=min(180, 36 + len(_gender_rows) * 35),
-            column_config={
-                "Gender":   st.column_config.TextColumn("Gender"),
-                "Students": st.column_config.NumberColumn("Students", format="%d"),
-            },
-        )
-        if "students_detail_open" not in st.session_state:
-            st.session_state["students_detail_open"] = False
-        if st.button("📊 Detailed Stats →", key="students_detail_btn", use_container_width=True):
-            st.session_state["students_detail_open"] = not st.session_state["students_detail_open"]
-            st.rerun()
+            if not _class_page_rows.empty:
+                _fig_cls = go.Figure(go.Bar(
+                    x=_class_page_rows["Pages"],
+                    y=_class_page_rows["Class"],
+                    orientation="h",
+                    marker_color="#FBBF24",
+                    text=[f"{int(v):,}" for v in _class_page_rows["Pages"]],
+                    textposition="outside",
+                    textfont=dict(size=10, color=_chart_text),
+                ))
+                _fig_cls.update_layout(**chart_layout(height=160 + len(_class_page_rows) * 28))
+                _fig_cls.update_layout(margin=dict(l=0, r=40, t=4, b=4))
+                _fig_cls.update_xaxes(visible=False)
+                _fig_cls.update_yaxes(
+                    tickmode="array",
+                    tickvals=list(_class_page_rows["Class"]),
+                    ticktext=[str(c) for c in _class_page_rows["Class"]],
+                    tickfont=dict(size=11),
+                    title="Class",
+                    title_font=dict(size=11),
+                )
+                st.plotly_chart(_fig_cls, use_container_width=True, config={"displayModeBar": False})
+            if "students_detail_open" not in st.session_state:
+                st.session_state["students_detail_open"] = False
+            if st.button("📊 Detailed Stats →", key="students_detail_btn", use_container_width=True):
+                st.session_state["students_detail_open"] = not st.session_state["students_detail_open"]
+                st.rerun()
 
-    # ── Languages card ──
-    with _c4:
-        _lang_rows = (
-            filtered[~filtered["regional_language"].isin(["Unknown", ""])]
-            .groupby("regional_language")["num_pages"]
-            .sum().sort_values(ascending=False)
-            .reset_index()
-            .rename(columns={"regional_language": "Language", "num_pages": "Pages"})
-        )
-        st.markdown(f"""
+        # ── Languages card ──
+        with _c4:
+            _lang_rows = (
+                filtered[~filtered["regional_language"].isin(["Unknown", ""])]
+                .groupby("regional_language")["num_pages"]
+                .sum().sort_values(ascending=True)
+                .reset_index()
+                .rename(columns={"regional_language": "Language", "num_pages": "Pages"})
+            )
+            st.markdown(f"""
 <div style='background:rgba(192,132,252,0.08);border:1px solid rgba(192,132,252,0.2);
-            border-radius:14px;padding:16px 18px 10px;margin-bottom:4px;'>
-  <div style='font-size:0.7rem;font-weight:700;color:#C084FC;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Languages</div>
-  <div style='font-size:2rem;font-weight:900;color:{_text};line-height:1;'>{n_languages}</div>
-  <div style='font-size:0.75rem;color:{_text3};margin-top:2px;'>regional languages</div>
+            border-radius:14px;padding:14px 16px 10px;margin-bottom:6px;'>
+  <div style='font-size:0.65rem;font-weight:700;color:#C084FC;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Languages</div>
+  <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{n_languages}</div>
+  <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>regional languages</div>
 </div>""", unsafe_allow_html=True)
-        st.dataframe(
-            _lang_rows,
-            hide_index=True, use_container_width=True, height=min(180, 36 + len(_lang_rows) * 35),
-            column_config={
-                "Language": st.column_config.TextColumn("Language"),
-                "Pages":    st.column_config.NumberColumn("Pages", format="%d"),
-            },
+            if not _lang_rows.empty:
+                _fig_lang = go.Figure(go.Bar(
+                    x=_lang_rows["Pages"],
+                    y=_lang_rows["Language"].str.title(),
+                    orientation="h",
+                    marker_color="#C084FC",
+                    text=[f"{int(v):,}" for v in _lang_rows["Pages"]],
+                    textposition="outside",
+                    textfont=dict(size=10, color=_chart_text),
+                ))
+                _fig_lang.update_layout(**chart_layout(height=160 + len(_lang_rows) * 28))
+                _fig_lang.update_layout(margin=dict(l=0, r=40, t=4, b=4))
+                _fig_lang.update_xaxes(visible=False)
+                _fig_lang.update_yaxes(tickfont=dict(size=11))
+                st.plotly_chart(_fig_lang, use_container_width=True, config={"displayModeBar": False})
+            if "lang_detail_open" not in st.session_state:
+                st.session_state["lang_detail_open"] = False
+            if st.button("📊 Detailed Stats →", key="lang_detail_btn", use_container_width=True):
+                st.session_state["lang_detail_open"] = not st.session_state["lang_detail_open"]
+                st.rerun()
+
+    with _col_sep:
+        st.markdown(f"""
+<div style='width:1px;background:{_border};min-height:500px;margin:0 auto;'></div>
+""", unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════
+    # RIGHT — QUALITY ANALYSIS
+    # ════════════════════════════════════════════════════════
+    with _col_right:
+        st.markdown(f"""
+<div style='font-size:0.72rem;font-weight:700;color:#34D399;text-transform:uppercase;
+            letter-spacing:0.12em;margin-bottom:12px;display:flex;align-items:center;gap:8px;'>
+  <span style='display:inline-block;width:4px;height:16px;background:#34D399;border-radius:3px;'></span>
+  Quality Analysis
+</div>""", unsafe_allow_html=True)
+
+        # ── Aggregate quality stats from the filtered dataset ──────────────
+        _q_total    = len(filtered)
+        _q_rejected = (filtered["quality_status"].isin(["Rejected (VS)", "Rejected (Bodhan)"])).sum()
+        _q_issues   = (filtered["quality_status"] == "Accepted w/ Issues").sum()
+        _q_clean    = (filtered["quality_status"] == "Clean").sum()
+        _q_pending  = (filtered["quality_status"] == "Pending").sum()
+        _q_rej_vs   = (filtered["quality_status"] == "Rejected (VS)").sum()
+        _q_rej_bo   = (filtered["quality_status"] == "Rejected (Bodhan)").sum()
+        _q_rej_pct  = round(_q_rejected / _q_total * 100, 1) if _q_total else 0
+        _q_issue_pct= round(_q_issues  / _q_total * 100, 1) if _q_total else 0
+        _q_clean_pct= round(_q_clean   / _q_total * 100, 1) if _q_total else 0
+
+        # ── Row 1: 4 KPI tiles ─────────────────────────────────────────────
+        _qa1, _qa2, _qa3, _qa4 = st.columns(4)
+        def _qa_tile(col, label, value, sub, color):
+            col.markdown(f"""
+<div style='background:rgba(255,255,255,0.03);border:1px solid {color}33;
+            border-radius:12px;padding:12px 10px 10px;text-align:center;'>
+  <div style='font-size:0.6rem;font-weight:700;color:{color};text-transform:uppercase;
+              letter-spacing:0.08em;margin-bottom:4px;'>{label}</div>
+  <div style='font-size:1.55rem;font-weight:900;color:{_text};line-height:1;'>{value}</div>
+  <div style='font-size:0.65rem;color:{_text2};margin-top:3px;'>{sub}</div>
+</div>""", unsafe_allow_html=True)
+
+        _qa_tile(_qa1, "Reviewed",    f"{_q_clean + _q_issues + _q_rejected:,}",
+                 f"{round((_q_clean+_q_issues+_q_rejected)/_q_total*100,1) if _q_total else 0}% of total", "#818CF8")
+        _qa_tile(_qa2, "Clean Pass",  f"{_q_clean:,}",
+                 f"{_q_clean_pct}% accepted", "#34D399")
+        _qa_tile(_qa3, "Flagged",     f"{_q_issues:,}",
+                 f"{_q_issue_pct}% w/ issues", "#FBBF24")
+        _qa_tile(_qa4, "Rejected",    f"{_q_rejected:,}",
+                 f"{_q_rej_pct}% reject rate", "#F43F5E")
+
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+        # ── Row 2: Rejection stage split + donut ──────────────────────────
+        _qb1, _qb2 = st.columns([1.3, 1])
+        with _qb1:
+            st.markdown(f"""
+<div style='background:rgba(244,63,94,0.06);border:1px solid rgba(244,63,94,0.18);
+            border-radius:12px;padding:12px 14px;'>
+  <div style='font-size:0.6rem;font-weight:700;color:#F43F5E;text-transform:uppercase;
+              letter-spacing:0.08em;margin-bottom:8px;'>Rejection Stage Split</div>
+  <div style='display:flex;gap:8px;align-items:center;'>
+    <div style='flex:1;'>
+      <div style='font-size:0.65rem;color:{_text2};margin-bottom:2px;'>Bodhan Stage</div>
+      <div style='background:rgba(255,255,255,0.06);border-radius:6px;height:8px;overflow:hidden;'>
+        <div style='width:{round(_q_rej_bo/_q_rejected*100,1) if _q_rejected else 0}%;
+                    background:#FB923C;height:100%;border-radius:6px;'></div>
+      </div>
+    </div>
+    <div style='font-size:0.9rem;font-weight:800;color:#FB923C;min-width:36px;text-align:right;'>{_q_rej_bo:,}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        with _qb2:
+            # Status donut
+            _donut_labels = ["Clean", "Flagged", "Rej VS", "Rej Bodhan", "Pending"]
+            _donut_vals   = [_q_clean, _q_issues, _q_rej_vs, _q_rej_bo, _q_pending]
+            _donut_colors = ["#34D399", "#FBBF24", "#F43F5E", "#FB923C", "#6B7280"]
+            _fig_donut = go.Figure(go.Pie(
+                labels=_donut_labels, values=_donut_vals,
+                hole=0.62,
+                marker=dict(colors=_donut_colors, line=dict(width=0)),
+                textinfo="none",
+                hovertemplate="%{label}: %{value} (%{percent})<extra></extra>",
+            ))
+            _donut_layout = chart_layout(height=130)
+            _donut_layout["margin"] = dict(l=0, r=0, t=0, b=0)
+            _fig_donut.update_layout(
+                **_donut_layout,
+                showlegend=False,
+                annotations=[dict(
+                    text=f"<b>{_q_total:,}</b><br><span style='font-size:9px'>total</span>",
+                    x=0.5, y=0.5, showarrow=False,
+                    font=dict(size=13, color=_text),
+                    xanchor="center",
+                )],
+            )
+            st.plotly_chart(_fig_donut, use_container_width=True, config={"displayModeBar": False})
+
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
+        # ── Row 3: Issue frequency bar ────────────────────────────────────
+        from collections import Counter
+        _all_issues: list[str] = []
+        for _iv in filtered["issues_vs"].dropna():
+            if isinstance(_iv, list):
+                _all_issues.extend(_iv)
+        for _ib in filtered["issues_bodhan"].dropna():
+            if isinstance(_ib, list):
+                _all_issues.extend(_ib)
+
+        _DEMO_ISSUES = {
+            "blur": 38, "lighting_condition": 27, "glare": 19,
+            "partial_page": 14, "skew": 11, "low_contrast": 8,
+            "ink_bleed": 5, "torn_page": 3,
+        }
+        _issue_source = Counter(_all_issues) if _all_issues else _DEMO_ISSUES
+        _issue_df = (
+            pd.DataFrame(_issue_source.items(), columns=["Issue", "Count"])
+            .sort_values("Count", ascending=True)
         )
-        if "lang_detail_open" not in st.session_state:
-            st.session_state["lang_detail_open"] = False
-        if st.button("📊 Detailed Stats →", key="lang_detail_btn", use_container_width=True):
-            st.session_state["lang_detail_open"] = not st.session_state["lang_detail_open"]
+        _issue_df["Issue"] = _issue_df["Issue"].str.replace("_", " ").str.title()
+        _is_demo_issues = not bool(_all_issues)
+        _fig_issues = go.Figure(go.Bar(
+            x=_issue_df["Count"],
+            y=_issue_df["Issue"],
+            orientation="h",
+            marker_color="#FBBF24" if not _is_demo_issues else "rgba(251,191,36,0.3)",
+            text=[str(v) for v in _issue_df["Count"]],
+            textposition="outside",
+            textfont=dict(size=10, color=_chart_text),
+        ))
+        _issues_layout = chart_layout(height=100 + len(_issue_df) * 26)
+        _issues_layout["margin"] = dict(l=0, r=36, t=0, b=0)
+        _fig_issues.update_layout(**_issues_layout)
+        _fig_issues.update_xaxes(visible=False)
+        _fig_issues.update_yaxes(tickfont=dict(size=11))
+        if _is_demo_issues:
+            st.markdown(f"""
+<div style='display:flex;align-items:center;gap:6px;margin-bottom:4px;'>
+  <span style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;'>Top Issue Types</span>
+  <span style='background:rgba(251,191,36,0.15);color:#FBBF24;font-size:0.6rem;font-weight:600;
+               padding:1px 7px;border-radius:8px;border:1px solid rgba(251,191,36,0.3);'>placeholder — to be updated</span>
+</div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;'>Top Issue Types</div>", unsafe_allow_html=True)
+        st.plotly_chart(_fig_issues, use_container_width=True, config={"displayModeBar": False})
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        # ── Row 4: Flagged page heatmap (page position histogram) ─────────
+        _all_flagged_pages: list[int] = []
+        for _pv in filtered["flagged_pages_vs"].dropna():
+            if isinstance(_pv, list):
+                _all_flagged_pages.extend([int(p) for p in _pv if str(p).isdigit() or isinstance(p, (int, float))])
+        for _pb in filtered["flagged_pages_bodhan"].dropna():
+            if isinstance(_pb, list):
+                _all_flagged_pages.extend([int(p) for p in _pb if str(p).isdigit() or isinstance(p, (int, float))])
+
+        _DEMO_PAGES = [1,1,1,2,2,3,4,5,5,6,8,10,10,10,11,12,15,15,18,20,20,23,23,25,30,35,45]
+        _is_demo_pages = not bool(_all_flagged_pages)
+        _page_src = _all_flagged_pages if _all_flagged_pages else _DEMO_PAGES
+        _page_ser = pd.Series(_page_src)
+        _max_pg = min(_page_ser.max(), 60)
+        _page_hist = _page_ser[_page_ser <= _max_pg].value_counts().sort_index()
+        _fig_pages = go.Figure(go.Bar(
+            x=_page_hist.index,
+            y=_page_hist.values,
+            marker_color="#F43F5E" if not _is_demo_pages else "rgba(244,63,94,0.3)",
+            marker_opacity=0.75,
+        ))
+        _pages_layout = chart_layout(height=110)
+        _pages_layout["margin"] = dict(l=0, r=0, t=0, b=0)
+        _fig_pages.update_layout(**_pages_layout)
+        _fig_pages.update_xaxes(title_text="Page #", title_font=dict(size=10), tickfont=dict(size=9))
+        _fig_pages.update_yaxes(title_text="Flags", title_font=dict(size=10), tickfont=dict(size=9))
+        if _is_demo_pages:
+            st.markdown(f"""
+<div style='display:flex;align-items:center;gap:6px;margin-bottom:4px;'>
+  <span style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;'>Flagged Page Distribution</span>
+  <span style='background:rgba(244,63,94,0.12);color:#F43F5E;font-size:0.6rem;font-weight:600;
+               padding:1px 7px;border-radius:8px;border:1px solid rgba(244,63,94,0.25);'>placeholder — to be updated</span>
+</div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;'>Flagged Page Distribution</div>", unsafe_allow_html=True)
+        st.plotly_chart(_fig_pages, use_container_width=True, config={"displayModeBar": False})
+
+        # ── Deeplink button → Sample Checker pre-filtered to flagged/rejected ─
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        _qc1, _qc2 = st.columns(2)
+        if _qc1.button("🔍 View Rejected Samples →", key="qa_view_rejected", use_container_width=True):
+            st.session_state["show_sample_checker"] = True
+            st.session_state["sc_quality_preset"] = "rejected"
+            st.rerun()
+        if _qc2.button("⚠️ View Flagged Samples →", key="qa_view_flagged", use_container_width=True):
+            st.session_state["show_sample_checker"] = True
+            st.session_state["sc_quality_preset"] = "flagged"
             st.rerun()
 
 # ── State Detailed Stats Panel ────────────────────────────────────────────────
@@ -1693,7 +2212,7 @@ if not st.session_state.get("show_summary") and st.session_state.get("state_deta
     # A school passes if ALL classes it has recorded meet the threshold
     _school_pass = (
         _sd_school_cls.groupby("school_name")
-        .apply(lambda g: (g["students"] >= _MIN_STUDENTS).all())
+        .apply(lambda g: (g["students"] >= _MIN_STUDENTS).all(), include_groups=False)
         .reset_index()
         .rename(columns={0: "passed"})
     )
