@@ -28,3 +28,5 @@ image.png
 scratch/
 rewrite.py
 ref/
+
+/.venv

@@ -4,13 +4,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 import numpy as np
-import boto3 
+import boto3
 from botocore.client import Config
 import io
 import json as _json
 import pypdf
 import urllib3
 import os
+import sqlite3
 from dotenv import load_dotenv
 
 from mappings import (
@@ -33,6 +34,8 @@ from chart_helpers import (
     C_RURAL, C_URBAN, C_LEFT, C_RIGHT,
     C_INDIGO, C_VIOLET, COLORS, CHART_HEIGHT,
 )
+
+import fitz  # pymupdf — page-to-image rendering for flagged page preview
 
 load_dotenv()
 
@@ -668,100 +671,182 @@ components.html(f"""
 # DATA LOADING & CLEANING
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=300, show_spinner="Loading data from bucket…")
-def load_bucket_data(exact_pages: bool = False) -> pd.DataFrame:
-    """Load all student records from MinIO bucket.
+_APPROVED_CSV  = Path("/home/oikantiknath/oikantik_vm/vs_code/data-upload/approved_uploads.csv")
+_ANNOTATION_DB = Path("/home/oikantiknath/oikantik_vm/vs_code/ui-annotation-verification/annotation.db")
 
-    exact_pages=True downloads every PDF to count pages precisely (slow, one-time).
-    exact_pages=False uses the persistent cache when available and estimates otherwise.
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def render_pdf_page_as_png(pdf_key: str, page_number: int) -> bytes | None:
+    """Download a PDF from MinIO and render a single page as PNG bytes.
+
+    page_number is 1-indexed (matches PDF page labels).
+    Returns None on any error so callers can fall back gracefully.
     """
-    s3 = _s3()
-    page_cache = _load_page_cache()
-    cache_dirty = False
+    try:
+        s3 = _s3()
+        buf = io.BytesIO()
+        s3.download_fileobj(MINIO_BUCKET, pdf_key, buf)
+        buf.seek(0)
+        doc = fitz.open(stream=buf.read(), filetype="pdf")
+        idx = page_number - 1
+        if idx < 0 or idx >= len(doc):
+            return None
+        page = doc[idx]
+        mat = fitz.Matrix(2.0, 2.0)  # 2× zoom → ~144 dpi, sharp but not huge
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        return pix.tobytes("png")
+    except Exception:
+        return None
 
-    # Single listing pass: collect JSON keys + PDF sizes
-    json_keys: list[str] = []
-    pdf_sizes: dict[str, int] = {}
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=MINIO_BUCKET, Prefix=MINIO_PREFIX):
-        for obj in page.get("Contents", []):
-            k = obj["Key"]
-            if k.endswith(".json"):
-                json_keys.append(k)
-            elif k.endswith(".pdf"):
-                pdf_sizes[k] = obj["Size"]
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_annotation_data() -> pd.DataFrame:
+    """Load review decisions and page-level issues from annotation.db.
+
+    Returns a DataFrame indexed by unique_file_id with columns:
+      reject_stage, review_flag, issues_vs, flagged_pages_vs
+    """
+    if not _ANNOTATION_DB.exists():
+        return pd.DataFrame(columns=["unique_file_id", "reject_stage", "review_flag",
+                                     "issues_vs", "flagged_pages_vs"])
+    conn = sqlite3.connect(str(_ANNOTATION_DB))
+    rows_out = []
+    try:
+        cur = conn.execute(
+            "SELECT unique_file_id, pdf_decision, page_rejections FROM pdf_annotations"
+        )
+        for uid, decision, page_rej_raw in cur.fetchall():
+            decision = (decision or "").strip().lower()
+
+            if decision == "rejected":
+                reject_stage = "reject_stage_vs"
+                review_flag  = "stage_vs"
+            elif decision == "accepted":
+                reject_stage = "null"
+                review_flag  = "stage_vs"
+            else:
+                reject_stage = "null"
+                review_flag  = "pending"
+
+            issues_vs        = []
+            flagged_pages_vs = []
+            page_issues_map_vs: dict[int, list[str]] = {}
+            try:
+                page_rejections = _json.loads(page_rej_raw or "[]")
+                for entry in page_rejections:
+                    pg   = entry.get("page")
+                    iss  = [i for i in (entry.get("issues") or []) if i]
+                    if iss:
+                        issues_vs.extend(iss)
+                        if pg is not None:
+                            pg_int = int(pg)
+                            flagged_pages_vs.append(pg_int)
+                            page_issues_map_vs.setdefault(pg_int, []).extend(iss)
+            except Exception:
+                pass
+
+            rows_out.append({
+                "unique_file_id":    uid,
+                "reject_stage":      reject_stage,
+                "review_flag":       review_flag,
+                "issues_vs":         issues_vs,
+                "flagged_pages_vs":  flagged_pages_vs,
+                "page_issues_map_vs": page_issues_map_vs,
+            })
+    finally:
+        conn.close()
+
+    return pd.DataFrame(rows_out)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_raw_counts() -> dict:
+    """Return upload counts from approved_uploads.csv."""
+    if not _APPROVED_CSV.exists():
+        return {"total": 0, "approved": 0, "pending_review": 0}
+    raw = pd.read_csv(_APPROVED_CSV, usecols=["reviewStatus"])
+    vc = raw["reviewStatus"].value_counts().to_dict()
+    return {
+        "total":          len(raw),
+        "approved":       vc.get("APPROVED", 0),
+        "pending_review": vc.get("PENDING",  0),
+    }
+
+@st.cache_data(ttl=300, show_spinner="Loading approved data…")
+def load_bucket_data(exact_pages: bool = False) -> pd.DataFrame:
+    """Load all approved student records from approved_uploads.csv.
+
+    Metadata comes from the CSV; PDFs live under data_hw_collection_approved_vs/.
+    exact_pages is accepted for API compatibility but ignored (pageCount is in the CSV).
+    """
+    raw = pd.read_csv(_APPROVED_CSV)
+
+    def _grade_num(val):
+        try:
+            return int(str(val).replace("Grade", "").strip())
+        except Exception:
+            return None
+
+    def _normalise(val, default="not mentioned"):
+        v = str(val or "").lower().strip()
+        return default if v in ("", "unknown", "none", "null", "nan") else v
 
     rows = []
-    for key in json_keys:
-        try:
-            meta = _json.loads(
-                s3.get_object(Bucket=MINIO_BUCKET, Key=key)["Body"].read()
-            )
-        except Exception:
-            continue
+    for _, r in raw.iterrows():
+        grade = _grade_num(r.get("classGrade"))
+        state_raw = str(r.get("state") or "").lower().strip().replace(" ", "_")
+        medium = str(r.get("medium") or "not mentioned").strip().title()
+        distributor_raw = str(r.get("uploadedByUserId") or "Not Mentioned").strip()
+        distributor = distributor_raw.split("@")[0].strip() if "@" in distributor_raw else distributor_raw
 
-        pdf_key   = key[:-5] + ".pdf"
-        pdf_size  = pdf_sizes.get(pdf_key, 0)
-        if exact_pages and pdf_key not in page_cache:
-            cache_dirty = True
-        num_pages = _count_pdf_pages(s3, pdf_key, pdf_size, page_cache, exact=exact_pages)
-
-        grade     = meta.get("grade")
-        state_raw = str(meta.get("state") or "").lower().strip()
-        lang_prim = str(meta.get("language_primary") or "").strip().title()
-
-        _ai_vs = meta.get("accept_issues_vs") or {}
-        _ai_bo = meta.get("accept_issues_bodhan") or {}
-        _issues_vs   = _ai_vs.get("issues", []) if isinstance(_ai_vs, dict) else []
-        _issues_bo   = _ai_bo.get("issues", []) if isinstance(_ai_bo, dict) else []
-        _pages_vs    = _ai_vs.get("page_num", []) if isinstance(_ai_vs, dict) else []
-        _pages_bo    = _ai_bo.get("page_num", []) if isinstance(_ai_bo, dict) else []
-        _reject_raw  = str(meta.get("reject_stage") or "null").lower().strip()
-        _review_raw  = str(meta.get("review_flag")  or "pending").lower().strip()
+        pdf_key = MINIO_PREFIX + str(r.get("s3Key") or "")
 
         rows.append({
-            "student_name":          str(meta.get("student_name") or "not mentioned").strip(),
-            "student_id":            str(meta.get("student_id")   or ""),
-            "unique_file_id":        str(meta.get("unique_file_id") or ""),
-            "school_id":             str(meta.get("school_id")    or ""),
-            "gender":                str(meta.get("gender")        or "not mentioned").lower().strip(),
-            "class":                 int(grade) if grade else None,
-            "class_level":           CLASS_LEVEL_FROM_GRADE.get(int(grade), "Unknown") if grade else "Unknown",
-            "school_name":           str(meta.get("school_name")   or "").strip(),
-            "school_type":           str(meta.get("school_type")   or "").strip(),
-            "board":                 ("not mentioned" if str(meta.get("board") or "").lower().strip() in ("", "unknown", "none") else str(meta.get("board")).lower().strip()),
-            "block":                 ("not mentioned" if str(meta.get("city_town_village") or "").lower().strip() in ("", "unknown", "none") else str(meta.get("city_town_village")).lower().strip()),
-            "district":              str(meta.get("district")      or "").strip().title(),
-            "state":                 state_raw.replace("_", " ").title() or "Unknown",
-            "regional_language":     lang_prim or STATE_TO_LANGUAGE.get(state_raw, "Unknown"),
-            "medium_of_instruction": str(meta.get("medium_of_instruction") or "not mentioned").strip().title(),
-            "subject":               str(meta.get("subject")       or "").lower().strip(),
-            "sample_type":           str(meta.get("source_type")   or "").lower().strip(),
-            "num_pages":             num_pages,
-            "date":                  pd.to_datetime(meta.get("uploaded_at"), errors="coerce", utc=True),
-            "rural_urban":           str(meta.get("rural_urban")   or "").strip().title(),
-            "aspirational_district": meta.get("aspirational_district", False),
-            "curriculum_type":       str(meta.get("curriculum_type") or "").strip(),
-            "performance_group":     str(meta.get("performance_group") or "").strip() or "Not Mentioned",
-            "capture_device":        str(meta.get("capture_device") or "").strip(),
-            "orientation":           str(meta.get("orientation")   or "").strip(),
-            "handedness":            ("not mentioned" if str(meta.get("handedness") or "").lower().strip() in ("", "unknown", "none", "null") else str(meta.get("handedness")).lower().strip()),
-            "handwritten_or_handdrawn": str(meta.get("handwritten_or_handdrawn") or "").lower().strip(),
-            "printed":               str(meta.get("printed")       or "").lower().strip(),
-            "mixed_content":         str(meta.get("mixed_content")  or "").lower().strip(),
-            "rotation":              str(meta.get("rotation")       or "").lower().strip(),
-            "distributor":           (lambda v: v.split("@")[0].strip() if "@" in v else v)(str(meta.get("distributor") or meta.get("uploaded_by") or meta.get("collector_name") or meta.get("data_collector") or "Not Mentioned").strip()),
-            "pdf_key":               pdf_key,
-            "reject_stage":          _reject_raw,
-            "review_flag":           _review_raw,
-            "issues_vs":             _issues_vs,
-            "issues_bodhan":         _issues_bo,
-            "flagged_pages_vs":      _pages_vs,
-            "flagged_pages_bodhan":  _pages_bo,
+            "student_name":             "not mentioned",
+            "student_id":               str(r.get("studentId") or ""),
+            "unique_file_id":           str(r.get("id") or ""),
+            "school_id":                str(r.get("schoolId") or ""),
+            "gender":                   str(r.get("gender") or "not mentioned").lower().strip(),
+            "class":                    grade,
+            "class_level":              CLASS_LEVEL_FROM_GRADE.get(grade, "Unknown") if grade else "Unknown",
+            "school_name":              str(r.get("schoolName") or "").strip(),
+            "school_type":              "",
+            "board":                    _normalise(r.get("board")),
+            "block":                    _normalise(r.get("block")),
+            "district":                 str(r.get("district") or "").strip().title(),
+            "state":                    state_raw.replace("_", " ").title() or "Unknown",
+            "regional_language":        medium if medium not in ("Not Mentioned", "") else STATE_TO_LANGUAGE.get(state_raw, "Unknown"),
+            "medium_of_instruction":    medium,
+            "subject":                  str(r.get("subject") or "").lower().strip(),
+            "sample_type":              str(r.get("sampleType") or "").lower().strip(),
+            "num_pages":                int(r.get("pageCount") or 1),
+            "date":                     pd.to_datetime(r.get("createdAt"), errors="coerce", utc=True),
+            "rural_urban":              "",
+            "aspirational_district":    bool(r.get("aspirationalDistrict", False)),
+            "curriculum_type":          "",
+            "performance_group":        "Not Mentioned",
+            "capture_device":           str(r.get("captureDevice") or "").strip(),
+            "orientation":              str(r.get("orientation") or "").strip(),
+            "handedness":               _normalise(r.get("dominantHand")),
+            "handwritten_or_handdrawn": str(r.get("handwritten") or "").lower().strip(),
+            "printed":                  str(r.get("printed") or "").lower().strip(),
+            "mixed_content":            str(r.get("mixedContent") or "").lower().strip(),
+            "rotation":                 str(r.get("rotation") or "").lower().strip(),
+            "distributor":              distributor,
+            "pdf_key":                  pdf_key,
+            "place":                    str(r.get("place") or "").strip().title(),
+            "file_number":              int(r.get("fileNumber") or 0),
+            "reviewed_at":              pd.to_datetime(r.get("reviewedAt"), errors="coerce", utc=True),
+            "generate_metadata":        bool(r.get("generateMetadata", False)),
+            "data_bucket":              bool(r.get("data_bucket", False)),
+            "reject_stage":             "null",
+            "review_flag":              "stage_vs",
+            "issues_vs":                [],
+            "issues_bodhan":            [],
+            "flagged_pages_vs":         [],
+            "flagged_pages_bodhan":     [],
+            "page_issues_map_vs":       {},
         })
-
-    if cache_dirty:
-        _save_page_cache(page_cache)
 
     if not rows:
         cols = ["student_name", "gender", "class", "class_level", "school_name",
@@ -772,7 +857,6 @@ def load_bucket_data(exact_pages: bool = False) -> pd.DataFrame:
 
     data = pd.DataFrame(rows)
 
-    # Normalize via maps (values already lowercase from above)
     def _map_subject(raw: str) -> str:
         mapped = SUBJECT_MAP.get(str(raw).lower().strip())
         if mapped:
@@ -791,7 +875,7 @@ def load_bucket_data(exact_pages: bool = False) -> pd.DataFrame:
         .fillna(_b.str.replace(" ", "_", regex=False).map(BOARD_MAP))
         .fillna("Other")
     )
-    data["block"]       = (
+    data["block"] = (
         data["block"].map(BLOCK_MAP)
         .fillna(data["block"].str.replace("_", " ").str.title())
     )
@@ -799,7 +883,6 @@ def load_bucket_data(exact_pages: bool = False) -> pd.DataFrame:
         data["sample_type"].map(SAMPLE_TYPE_MAP)
         .fillna(data["sample_type"].str.replace("_", " ").str.title())
     )
-
     data["school_name"] = data["school_name"].apply(
         lambda x: SCHOOL_NORMALIZATIONS.get(str(x).strip().lower(), str(x).strip().title())
     )
@@ -838,6 +921,22 @@ for _lang, _lvls in _LANG_PARTICIPANTS.items():
         }
     LANGUAGE_SPECIFIC_TARGETS[_lang] = _lang_entry
 
+# ── State-wise page targets (Phase 1, source: State Wise Project Tracker.xlsx) ─
+# Each entry: (display_label, [matching state names in df], target_pages)
+# AP & Telangana share a single 200k target in the tracker.
+_STATE_TARGET_ROWS = [
+    ("Tamil Nadu",     ["Tamil Nadu"],                   200_000),
+    ("AP & Telangana", ["Andhra Pradesh", "Telangana"],  200_000),
+    ("Uttar Pradesh",  ["Uttar Pradesh"],                200_000),
+    ("Karnataka",      ["Karnataka"],                    200_000),
+    ("Maharashtra",    ["Maharashtra"],                  200_000),
+    ("Odisha",         ["Odisha"],                       200_000),
+    ("Kerala",         ["Kerala"],                       200_000),
+    ("West Bengal",    ["West Bengal"],                  200_000),
+    ("Gujarat",        ["Gujarat"],                      200_000),
+    ("Punjab",         ["Punjab"],                       200_000),
+]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOAD DATA
@@ -861,6 +960,9 @@ def _last_updated_str() -> str:
     except Exception:
         return "unknown"
 
+
+# Load full upload counts (approved + unapproved) from raw CSV
+_raw_counts = load_raw_counts()
 
 # Prefer cached parquet (written by cron); fall back to live bucket load
 if CACHE_PARQUET.exists():
@@ -892,6 +994,30 @@ for _col in ("reject_stage", "review_flag"):
 for _col in ("issues_vs", "issues_bodhan", "flagged_pages_vs", "flagged_pages_bodhan"):
     if _col not in df.columns:
         df[_col] = [[] for _ in range(len(df))]
+if "page_issues_map_vs" not in df.columns:
+    df["page_issues_map_vs"] = [{} for _ in range(len(df))]
+
+# ── Merge annotation DB data into df ─────────────────────────────────────────
+_ann = load_annotation_data()
+if not _ann.empty and "unique_file_id" in df.columns:
+    _ann = _ann.set_index("unique_file_id")
+    for _idx in df.index:
+        _uid = df.at[_idx, "unique_file_id"]
+        if _uid in _ann.index:
+            _row = _ann.loc[_uid]
+            df.at[_idx, "reject_stage"]        = _row["reject_stage"]
+            df.at[_idx, "review_flag"]         = _row["review_flag"]
+            df.at[_idx, "issues_vs"]           = _row["issues_vs"]
+            df.at[_idx, "flagged_pages_vs"]    = _row["flagged_pages_vs"]
+            df.at[_idx, "page_issues_map_vs"]  = _row.get("page_issues_map_vs", {})
+
+for _col in ("place", "generate_metadata", "data_bucket"):
+    if _col not in df.columns:
+        df[_col] = "" if _col == "place" else False
+if "file_number" not in df.columns:
+    df["file_number"] = 0
+if "reviewed_at" not in df.columns:
+    df["reviewed_at"] = pd.NaT
 
 # Re-apply board normalisation in case parquet was built before current BOARD_MAP
 _board_valid = set(BOARD_MAP.values())
@@ -1014,7 +1140,7 @@ _chart_text = _text2 if _dark else _text   # mirrors make_chart_layout logic
 
 
 
-_days_left = (pd.Timestamp("2026-05-31", tz="Asia/Kolkata") - pd.Timestamp.now(tz="Asia/Kolkata")).days
+_days_left = (pd.Timestamp("2026-07-05", tz="Asia/Kolkata") - pd.Timestamp.now(tz="Asia/Kolkata")).days
 
 with st.sidebar:
     st.markdown("## OCR-VS")
@@ -1024,7 +1150,7 @@ with st.sidebar:
     st.markdown(
         f'<div style="background:{_bg2}; border:1px solid {_border}; border-radius:10px; padding:10px 14px; margin-bottom:8px;">'
         f'<div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:1px; color:{_text2}; font-weight:600;">Phase 1 Deadline</div>'
-        f'<div style="font-size:1.05rem; font-weight:700; color:{_text}; margin-top:2px;">31 May 2026</div>'
+        f'<div style="font-size:1.05rem; font-weight:700; color:{_text}; margin-top:2px;">5 Jul 2026</div>'
         f'<div style="font-size:0.85rem; font-weight:600; color:{_deadline_color}; margin-top:2px;">{_days_left} days remaining</div>'
         f'</div>',
         unsafe_allow_html=True,
@@ -1287,7 +1413,11 @@ if st.session_state["show_sample_checker"]:
     # Quality status filter (honours deeplink preset from Quality Analysis panel)
     _quality_status_opts = ["All", "Pending", "Clean", "Accepted w/ Issues", "Rejected (VS)", "Rejected (Bodhan)"]
     _preset = st.session_state.pop("sc_quality_preset", None)
-    _preset_map = {"rejected": "Rejected (VS)", "flagged": "Accepted w/ Issues"}
+    _preset_map = {
+        "rejected": "Rejected (VS)",
+        "flagged": "Accepted w/ Issues",
+        "clean": "Clean"  # For viewing accepted samples
+    }
     _quality_default = _preset_map.get(_preset, "All")
     _quality_default_idx = _quality_status_opts.index(_quality_default) if _quality_default in _quality_status_opts else 0
     _sel_sc_quality = _sc_fd.selectbox(
@@ -1337,54 +1467,8 @@ if st.session_state["show_sample_checker"]:
                 st.session_state["sc_view_idx"] = None
                 st.session_state["sc_jump_page"] = None
                 st.rerun()
-            # Load JSON metadata to embed inside the details card
+            # JSON metadata section disabled (files not available yet)
             _json_section = ""
-            try:
-                _json_key = _pdf_key_val.rsplit(".", 1)[0] + ".json"
-                _s3_client = _s3()
-                _json_obj = _s3_client.get_object(Bucket=MINIO_BUCKET, Key=_json_key)
-                _json_data_raw = _json.loads(_json_obj["Body"].read())
-
-                def _flatten_json(obj, prefix=""):
-                    """Flatten nested JSON into a list of (label, value) pairs."""
-                    items = []
-                    if isinstance(obj, dict):
-                        for k, v in obj.items():
-                            full_key = f"{prefix} · {k}" if prefix else k
-                            if isinstance(v, (dict, list)):
-                                items.extend(_flatten_json(v, full_key))
-                            else:
-                                items.append((full_key, v))
-                    elif isinstance(obj, list):
-                        for i, v in enumerate(obj):
-                            full_key = f"{prefix}[{i}]"
-                            if isinstance(v, (dict, list)):
-                                items.extend(_flatten_json(v, full_key))
-                            else:
-                                items.append((full_key, v))
-                    return items
-
-                # Keys already shown in the top card — skip to avoid duplication
-                _SKIP_JSON_KEYS = {
-                    "student_name", "gender", "grade", "class", "school_name",
-                    "district", "block", "subject", "source_type", "sample_type",
-                    "num_pages", "pages",
-                }
-                _json_tiles = "".join(
-                    f"<div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;"
-                    f"letter-spacing:.07em;word-break:break-word;'>{str(lbl).replace('_',' ').title()}</div>"
-                    f"<div style='font-size:0.82rem;font-weight:600;color:{_text3};word-break:break-word;'>"
-                    f"{str(val).title() if val not in (None, '') else '—'}</div></div>"
-                    for lbl, val in _flatten_json(_json_data_raw)
-                    if lbl.lower() not in _SKIP_JSON_KEYS
-                )
-                _json_section = f"""
-<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px;
-            padding-top:8px;border-top:1px solid {_border_card};'>
-  {_json_tiles}
-</div>"""
-            except Exception as _je:
-                _json_section = f"<div style='margin-top:6px;font-size:0.65rem;color:{_error_color};'>Could not load JSON metadata: {_je}</div>"
 
             # ── Build quality banner for this record ──────────────────────
             _row_qs      = str(_sc_row.get("quality_status", "Pending"))
@@ -1447,8 +1531,10 @@ if st.session_state["show_sample_checker"]:
 <div style='background:{_bg2};border:1px solid {_border_card};
      border-radius:10px;padding:10px 16px;margin:0 0 10px;'>
   <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:8px;'>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Student</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["student_name"]).title()}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Student ID</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};font-family:monospace;'>{str(_sc_row["student_id"])}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>File ID</div>
+         <div style='font-size:0.72rem;font-weight:600;color:{_text4};font-family:monospace;' title='{str(_sc_row["unique_file_id"])}'>{str(_sc_row["unique_file_id"])[:8]}…</div></div>
     <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Class</div>
          <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{_cls_v}</div></div>
     <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Subject</div>
@@ -1467,6 +1553,8 @@ if st.session_state["show_sample_checker"]:
          <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["date"])[:10] if pd.notna(_sc_row["date"]) else "—"}</div></div>
     <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Sample Type</div>
          <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["sample_type"]).title()}</div></div>
+    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>State</div>
+         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["state"])}</div></div>
   </div>
   {_json_section}
 </div>
@@ -1480,7 +1568,7 @@ if st.session_state["show_sample_checker"]:
                 st.session_state["sc_jump_page"] = None
             _jump_page = st.session_state.get("sc_jump_page")
 
-            if _pdf_url and _found_ext == "pdf" and _row_fp_all:
+            if _found_ext == "pdf" and _row_fp_all:
                 st.markdown(f"""
 <div style='display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px;'>
   <span style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;
@@ -1494,20 +1582,78 @@ if st.session_state["show_sample_checker"]:
                         st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
 
+            # ── Flagged page image preview (instant, no full-PDF wait) ────
+            if _jump_page and _found_ext == "pdf":
+                if "sc_show_page_preview" not in st.session_state:
+                    st.session_state["sc_show_page_preview"] = True
+                _preview_open = st.session_state["sc_show_page_preview"]
+                _prev_label = f"▲ Hide page {_jump_page} preview" if _preview_open else f"▼ Show page {_jump_page} preview"
+                st.markdown(f"""
+<style>
+div[data-testid="stButton"]:has(button[key="toggle_page_preview"]) button {{
+    background: {'rgba(251,191,36,0.15)' if _preview_open else _bg2} !important;
+    border: 1px solid {'rgba(251,191,36,0.45)' if _preview_open else 'rgba(251,191,36,0.25)'} !important;
+    color: #FBBF24 !important;
+    font-size: 0.7rem !important; font-weight: 700 !important;
+    letter-spacing: 0.06em !important; border-radius: 8px !important;
+    padding: 4px 14px !important;
+}}
+</style>""", unsafe_allow_html=True)
+                if st.button(_prev_label, key="toggle_page_preview"):
+                    st.session_state["sc_show_page_preview"] = not _preview_open
+                    st.rerun()
+
+                if st.session_state["sc_show_page_preview"]:
+                    with st.spinner(f"Rendering page {_jump_page}…"):
+                        _pg_png = render_pdf_page_as_png(_pdf_key_val, _jump_page)
+                    if _pg_png:
+                        _pg_issue_map = _sc_row.get("page_issues_map_vs") or {}
+                        _pg_issues = _pg_issue_map.get(_jump_page, [])
+                        _issue_chips = "".join(
+                            f"<span style='background:rgba(244,63,94,0.15);color:#F43F5E;"
+                            f"font-size:0.65rem;font-weight:600;padding:2px 9px;"
+                            f"border-radius:8px;border:1px solid rgba(244,63,94,0.3);'>"
+                            f"{str(i).replace('_',' ').title()}</span>"
+                            for i in dict.fromkeys(_pg_issues)
+                        ) if _pg_issues else (
+                            f"<span style='font-size:0.62rem;color:{_text4};'>No specific issue label recorded</span>"
+                        )
+                        st.markdown(f"""
+<div style='border:1px solid rgba(251,191,36,0.35);border-radius:10px;
+            overflow:hidden;margin-bottom:10px;'>
+  <div style='background:rgba(251,191,36,0.08);padding:8px 14px;
+              border-bottom:1px solid rgba(251,191,36,0.2);'>
+    <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;'>
+      <span style='font-size:0.7rem;font-weight:700;color:#FBBF24;'>Flagged page {_jump_page}</span>
+      <span style='font-size:0.62rem;color:{_text4};'>quick preview · full PDF below</span>
+    </div>
+    <div style='display:flex;flex-wrap:wrap;gap:5px;'>{_issue_chips}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+                        st.image(_pg_png, use_container_width=True)
+                    else:
+                        st.warning(f"Could not render page {_jump_page} — see full PDF below.")
+
             _pdf_src = _pdf_url
             if _jump_page and _pdf_url and _found_ext == "pdf":
                 _pdf_src = f"{_pdf_url}#page={_jump_page}"
 
             if _pdf_url and _found_ext == "pdf":
+                _pdf_filename = _pdf_key_val.split("/")[-1]
+                _jump_badge = (
+                    f"<span style='margin-left:8px;background:rgba(251,191,36,0.15);"
+                    f"color:#FBBF24;font-size:0.68rem;font-weight:700;"
+                    f"padding:2px 8px;border-radius:6px;border:1px solid rgba(251,191,36,0.3);'>"
+                    f"p.{_jump_page}</span>"
+                ) if _jump_page else ""
                 st.markdown(f"""
 <div style='background:{_bg3};border:1px solid {_border_card};
      border-radius:12px;overflow:hidden;box-shadow:0 8px 32px {_shadow};'>
   <div style='background:{_bg2};padding:8px 14px;display:flex;
        align-items:center;justify-content:space-between;border-bottom:1px solid {_border2};'>
-    <span style='font-size:0.75rem;font-weight:600;color:{_text2};'>
-      📄 {_pdf_key_val.split("/")[-1]}
-      {"&nbsp;&nbsp;<span style='color:#FBBF24;font-size:0.7rem;'>→ p." + str(_jump_page) + "</span>" if _jump_page else ""}
-    </span>
+    <div style='display:flex;align-items:center;gap:6px;font-size:0.75rem;font-weight:600;color:{_text2};'>
+      📄 {_pdf_filename}{_jump_badge}
+    </div>
     <a href="{_pdf_url}" target="_blank"
        style='font-size:0.72rem;color:{_accent};text-decoration:none;font-weight:600;
               background:{_accent_bg};padding:3px 10px;border-radius:6px;
@@ -1587,7 +1733,7 @@ if st.session_state["show_sample_checker"]:
                 _pg_chips = f"<span style='color:{_text2};font-size:0.65rem;'>—</span>"
 
             _rc[0].markdown(f"<div style='font-size:0.75rem;color:{_text2};padding:7px 0;'>{_abs_i+1}</div>", unsafe_allow_html=True)
-            _rc[1].markdown(f"<div style='font-size:0.75rem;color:{_text3};font-weight:600;padding:7px 0;'>{str(_r['student_name']).title()}</div>", unsafe_allow_html=True)
+            _rc[1].markdown(f"<div style='font-size:0.72rem;color:{_text3};font-weight:600;padding:7px 0;font-family:monospace;'>{str(_r['student_id'])}</div>", unsafe_allow_html=True)
             _rc[2].markdown(f"<div style='font-size:0.75rem;color:{_text3};padding:7px 0;'>{_cl}</div>", unsafe_allow_html=True)
             _rc[3].markdown(f"<div style='font-size:0.75rem;color:{_text3};padding:7px 0;'>{str(_r['subject']).title()}</div>", unsafe_allow_html=True)
             _rc[4].markdown(f"<div style='font-size:0.75rem;color:{_text3};padding:7px 0;'>{int(_r['num_pages'])}</div>", unsafe_allow_html=True)
@@ -1682,7 +1828,7 @@ if not st.session_state.get("show_summary"):
 
     # Progress bar
     _bar_filled = min(_hero_pct, 100)
-    _deadline_str = pd.Timestamp("2026-05-31", tz="Asia/Kolkata").strftime("%d %b %Y")
+    _deadline_str = pd.Timestamp("2026-07-05", tz="Asia/Kolkata").strftime("%d %b %Y")
     st.markdown(f"""
 <div style='margin-bottom:28px;'>
   <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;'>
@@ -1701,6 +1847,56 @@ if not st.session_state.get("show_summary"):
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+    # ── State-wise Progress toggle ────────────────────────────────────────────
+    if "show_state_targets" not in st.session_state:
+        st.session_state["show_state_targets"] = False
+    _stp_open = st.session_state["show_state_targets"]
+    _stp_label = "▲ Hide State Targets" if _stp_open else "▼ State-wise Targets"
+    st.markdown(f"""
+<style>
+div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
+    background: {'rgba(129,140,248,0.18)' if _stp_open else _bg2} !important;
+    border: 1px solid {'rgba(129,140,248,0.5)' if _stp_open else _border_card} !important;
+    color: {'#818CF8' if _stp_open else _text2} !important;
+    font-size: 0.72rem !important; font-weight: 700 !important;
+    text-transform: uppercase; letter-spacing: 0.08em !important;
+    border-radius: 8px !important; padding: 5px 14px !important;
+    width: 100% !important;
+}}
+</style>""", unsafe_allow_html=True)
+    if st.button(_stp_label, key="toggle_state_targets"):
+        st.session_state["show_state_targets"] = not _stp_open
+        st.rerun()
+
+    if st.session_state["show_state_targets"]:
+        st.markdown(f"""
+<div style='font-size:0.65rem;font-weight:500;color:{_text4};letter-spacing:0;
+            margin:6px 0 10px;'>Phase 1 · 2,00,000 pages / state · Jul 5 2026</div>
+""", unsafe_allow_html=True)
+        _st_cols_a = st.columns(5)
+        _st_cols_b = st.columns(5)
+        for _si, (_slabel, _snames, _starget) in enumerate(_STATE_TARGET_ROWS):
+            _scol = _st_cols_a[_si] if _si < 5 else _st_cols_b[_si - 5]
+            _spages = int(df[df["state"].isin(_snames)]["num_pages"].sum())
+            _spct   = min(_spages / _starget * 100, 100) if _starget else 0
+            _sclr   = "#10B981" if _spct >= 100 else "#F59E0B" if _spct >= 60 else "#F43F5E"
+            _scol.markdown(f"""
+<div style='background:{_bg2};border:1px solid {_border_card};border-radius:12px;
+            padding:10px 12px 8px;margin-bottom:12px;'>
+  <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;'>
+    <div style='font-size:0.72rem;font-weight:700;color:{_text3};white-space:nowrap;
+                overflow:hidden;text-overflow:ellipsis;max-width:80%;'>{_slabel}</div>
+    <div style='font-size:0.68rem;font-weight:800;color:{_sclr};margin-left:4px;'>{_spct:.0f}%</div>
+  </div>
+  <div style='background:{_progress_track};border-radius:5px;height:6px;overflow:hidden;'>
+    <div style='width:{_spct:.1f}%;background:linear-gradient(90deg,{_sclr}bb,{_sclr});
+                height:100%;border-radius:5px;box-shadow:0 0 6px {_sclr}44;'></div>
+  </div>
+  <div style='font-size:0.6rem;color:{_text4};margin-top:4px;'>
+    {_spages:,} / {_starget:,}
+  </div>
+</div>""", unsafe_allow_html=True)
 
     # ── Left / Right split: Collection | Quality Analysis ──
     _n_subj_unique = filtered["subject"].nunique()
@@ -1911,51 +2107,148 @@ if not st.session_state.get("show_summary"):
         _q_pending  = (filtered["quality_status"] == "Pending").sum()
         _q_rej_vs   = (filtered["quality_status"] == "Rejected (VS)").sum()
         _q_rej_bo   = (filtered["quality_status"] == "Rejected (Bodhan)").sum()
+        _q_accepted = _q_clean + _q_issues  # Total accepted (clean + with issues)
         _q_rej_pct  = round(_q_rejected / _q_total * 100, 1) if _q_total else 0
         _q_issue_pct= round(_q_issues  / _q_total * 100, 1) if _q_total else 0
-        _q_clean_pct= round(_q_clean   / _q_total * 100, 1) if _q_total else 0
+        _q_accept_pct= round(_q_accepted / _q_total * 100, 1) if _q_total else 0
 
-        # ── Row 1: 4 KPI tiles ─────────────────────────────────────────────
+        # Raw upload counts (full set, unfiltered — from uploads_export.csv)
+        _raw_total        = _raw_counts["total"]
+        _raw_approved     = _raw_counts["approved"]
+        _raw_pending_rev  = _raw_counts["pending_review"]
+        _raw_approve_pct  = round(_raw_approved / _raw_total * 100, 1) if _raw_total else 0
+        _raw_pending_pct  = round(_raw_pending_rev / _raw_total * 100, 1) if _raw_total else 0
+
+        # ── Row 0: Full upload pipeline banner ────────────────────────────
+        st.markdown(f"""
+<div style='background:{_bg3};border:1px solid {_border_card};border-radius:12px;
+            padding:12px 16px;margin-bottom:10px;
+            display:flex;align-items:center;gap:0;flex-wrap:wrap;'>
+  <div style='flex:1;min-width:120px;text-align:center;padding:4px 12px;'>
+    <div style='font-size:0.58rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>Total Uploads</div>
+    <div style='font-size:1.5rem;font-weight:900;color:{_text};line-height:1;'>{_raw_total:,}</div>
+    <div style='font-size:0.62rem;color:{_text2};margin-top:2px;'>all submitted</div>
+  </div>
+  <div style='width:1px;background:{_border_card};align-self:stretch;margin:4px 0;'></div>
+  <div style='flex:1;min-width:120px;text-align:center;padding:4px 12px;'>
+    <div style='font-size:0.58rem;font-weight:700;color:#34D399;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>✓ Approved</div>
+    <div style='font-size:1.5rem;font-weight:900;color:#34D399;line-height:1;'>{_raw_approved:,}</div>
+    <div style='font-size:0.62rem;color:{_text2};margin-top:2px;'>{_raw_approve_pct}% of total</div>
+  </div>
+  <div style='width:1px;background:{_border_card};align-self:stretch;margin:4px 0;'></div>
+  <div style='flex:1;min-width:120px;text-align:center;padding:4px 12px;'>
+    <div style='font-size:0.58rem;font-weight:700;color:#FBBF24;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>⏳ Pending Review</div>
+    <div style='font-size:1.5rem;font-weight:900;color:#FBBF24;line-height:1;'>{_raw_pending_rev:,}</div>
+    <div style='font-size:0.62rem;color:{_text2};margin-top:2px;'>{_raw_pending_pct}% awaiting</div>
+  </div>
+  <div style='width:100%;margin-top:10px;'>
+    <div style='background:rgba(255,255,255,0.06);border-radius:6px;height:8px;overflow:hidden;display:flex;'>
+      <div style='width:{_raw_approve_pct}%;background:#34D399;height:100%;'></div>
+      <div style='width:{_raw_pending_pct}%;background:#FBBF24;height:100%;'></div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        # ── Row 1: Enhanced KPI tiles with Accept/Reject showcase ──────────
         _qa1, _qa2, _qa3, _qa4 = st.columns(4)
-        def _qa_tile(col, label, value, sub, color):
+        def _qa_tile(col, label, value, sub, color, icon=""):
             col.markdown(f"""
 <div style='background:rgba(255,255,255,0.03);border:1px solid {color}33;
-            border-radius:12px;padding:12px 10px 10px;text-align:center;'>
+            border-radius:12px;padding:12px 10px 10px;text-align:center;
+            transition:all 0.2s ease;'>
   <div style='font-size:0.6rem;font-weight:700;color:{color};text-transform:uppercase;
-              letter-spacing:0.08em;margin-bottom:4px;'>{label}</div>
+              letter-spacing:0.08em;margin-bottom:4px;'>{icon} {label}</div>
   <div style='font-size:1.55rem;font-weight:900;color:{_text};line-height:1;'>{value}</div>
   <div style='font-size:0.65rem;color:{_text2};margin-top:3px;'>{sub}</div>
 </div>""", unsafe_allow_html=True)
 
-        _qa_tile(_qa1, "Reviewed",    f"{_q_clean + _q_issues + _q_rejected:,}",
-                 f"{round((_q_clean+_q_issues+_q_rejected)/_q_total*100,1) if _q_total else 0}% of total", "#818CF8")
-        _qa_tile(_qa2, "Clean Pass",  f"{_q_clean:,}",
-                 f"{_q_clean_pct}% accepted", "#34D399")
-        _qa_tile(_qa3, "Flagged",     f"{_q_issues:,}",
-                 f"{_q_issue_pct}% w/ issues", "#FBBF24")
-        _qa_tile(_qa4, "Rejected",    f"{_q_rejected:,}",
-                 f"{_q_rej_pct}% reject rate", "#F43F5E")
+        _qa_tile(_qa1, "Total Reviewed", f"{_q_clean + _q_issues + _q_rejected:,}",
+                 f"{round((_q_clean+_q_issues+_q_rejected)/_q_total*100,1) if _q_total else 0}% of {_q_total:,} approved", "#818CF8", "📊")
+        _qa_tile(_qa2, "✓ Accepted",  f"{_q_accepted:,}",
+                 f"{_q_accept_pct}% approved", "#34D399", "")
+        _qa_tile(_qa3, "⚠ With Issues",     f"{_q_issues:,}",
+                 f"{_q_issue_pct}% flagged", "#FBBF24", "")
+        _qa_tile(_qa4, "✗ Rejected",    f"{_q_rejected:,}",
+                 f"{_q_rej_pct}% reject rate", "#F43F5E", "")
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-        # ── Row 2: Rejection stage split + donut ──────────────────────────
+        # ── Row 2: Accepted vs Rejected Comparison + Status Donut ─────────
         _qb1, _qb2 = st.columns([1.3, 1])
         with _qb1:
+            # Calculate reviewed count (excluding pending)
+            _q_reviewed = _q_accepted + _q_rejected
+            _q_accept_of_reviewed_pct = round(_q_accepted / _q_reviewed * 100, 1) if _q_reviewed > 0 else 0
+            _q_reject_of_reviewed_pct = round(_q_rejected / _q_reviewed * 100, 1) if _q_reviewed > 0 else 0
+
+            # Review Decision Breakdown card — redesigned bars
             st.markdown(f"""
-<div style='background:rgba(244,63,94,0.06);border:1px solid rgba(244,63,94,0.18);
-            border-radius:12px;padding:12px 14px;'>
-  <div style='font-size:0.6rem;font-weight:700;color:#F43F5E;text-transform:uppercase;
-              letter-spacing:0.08em;margin-bottom:8px;'>Rejection Stage Split</div>
-  <div style='display:flex;gap:8px;align-items:center;'>
-    <div style='flex:1;'>
-      <div style='font-size:0.65rem;color:{_text2};margin-bottom:2px;'>Bodhan Stage</div>
-      <div style='background:rgba(255,255,255,0.06);border-radius:6px;height:8px;overflow:hidden;'>
-        <div style='width:{round(_q_rej_bo/_q_rejected*100,1) if _q_rejected else 0}%;
-                    background:#FB923C;height:100%;border-radius:6px;'></div>
+<div style='background:{_bg3};border:1px solid {_border_card};
+            border-radius:12px;padding:16px 18px;height:100%;box-sizing:border-box;'>
+  <div style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;
+              letter-spacing:0.08em;margin-bottom:14px;'>Review Decision Breakdown</div>
+
+  <!-- Accepted row -->
+  <div style='margin-bottom:14px;'>
+    <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;'>
+      <span style='font-size:0.75rem;font-weight:600;color:#34D399;'>✓ Accepted</span>
+      <div style='display:flex;align-items:baseline;gap:6px;'>
+        <span style='font-size:1.35rem;font-weight:900;color:#34D399;line-height:1;'>{_q_accepted:,}</span>
+        <span style='font-size:0.7rem;font-weight:600;color:{_text2};'>{_q_accept_of_reviewed_pct}%</span>
       </div>
     </div>
-    <div style='font-size:0.9rem;font-weight:800;color:#FB923C;min-width:36px;text-align:right;'>{_q_rej_bo:,}</div>
+    <div style='background:rgba(52,211,153,0.12);border-radius:8px;height:32px;overflow:hidden;
+                border:1px solid rgba(52,211,153,0.2);position:relative;'>
+      <div style='width:{min(_q_accept_of_reviewed_pct, 100)}%;background:linear-gradient(90deg,#34D399,#6EE7B7);
+                  height:100%;border-radius:8px;transition:width 0.6s ease;'></div>
+      {"" if _q_accept_of_reviewed_pct == 0 else f"<span style='position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:0.72rem;font-weight:700;color:{'#000' if _q_accept_of_reviewed_pct > 15 else '#34D399'};'>{_q_accept_of_reviewed_pct}%</span>"}
+    </div>
   </div>
+
+  <!-- Rejected row -->
+  <div style='margin-bottom:14px;'>
+    <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;'>
+      <span style='font-size:0.75rem;font-weight:600;color:#F43F5E;'>✗ Rejected</span>
+      <div style='display:flex;align-items:baseline;gap:6px;'>
+        <span style='font-size:1.35rem;font-weight:900;color:#F43F5E;line-height:1;'>{_q_rejected:,}</span>
+        <span style='font-size:0.7rem;font-weight:600;color:{_text2};'>{_q_reject_of_reviewed_pct}%</span>
+      </div>
+    </div>
+    <div style='background:rgba(244,63,94,0.12);border-radius:8px;height:32px;overflow:hidden;
+                border:1px solid rgba(244,63,94,0.2);position:relative;'>
+      <div style='width:{min(_q_reject_of_reviewed_pct, 100)}%;background:linear-gradient(90deg,#F43F5E,#FB7185);
+                  height:100%;border-radius:8px;transition:width 0.6s ease;'></div>
+      {"" if _q_reject_of_reviewed_pct == 0 else f"<span style='position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:0.72rem;font-weight:700;color:{'#fff' if _q_reject_of_reviewed_pct > 15 else '#F43F5E'};'>{_q_reject_of_reviewed_pct}%</span>"}
+    </div>
+  </div>
+
+  <!-- With Issues row -->
+  <div style='margin-bottom:{"12px" if _q_rejected > 0 else "0"};'>
+    <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;'>
+      <span style='font-size:0.75rem;font-weight:600;color:#FBBF24;'>⚠ With Issues</span>
+      <div style='display:flex;align-items:baseline;gap:6px;'>
+        <span style='font-size:1.35rem;font-weight:900;color:#FBBF24;line-height:1;'>{_q_issues:,}</span>
+        <span style='font-size:0.7rem;font-weight:600;color:{_text2};'>{_q_issue_pct}%</span>
+      </div>
+    </div>
+    <div style='background:rgba(251,191,36,0.12);border-radius:8px;height:32px;overflow:hidden;
+                border:1px solid rgba(251,191,36,0.2);position:relative;'>
+      <div style='width:{min(_q_issue_pct, 100)}%;background:linear-gradient(90deg,#FBBF24,#FCD34D);
+                  height:100%;border-radius:8px;transition:width 0.6s ease;'></div>
+      {"" if _q_issue_pct == 0 else f"<span style='position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:0.72rem;font-weight:700;color:{'#000' if _q_issue_pct > 15 else '#FBBF24'};'>{_q_issue_pct}%</span>"}
+    </div>
+  </div>
+
+  {f'''<div style='padding-top:10px;border-top:1px solid {_border};display:flex;gap:16px;'>
+    <div>
+      <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:0.07em;margin-bottom:2px;'>VS Stage</div>
+      <span style='font-size:0.9rem;font-weight:800;color:#F43F5E;'>{_q_rej_vs:,}</span>
+    </div>
+    <div>
+      <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:0.07em;margin-bottom:2px;'>Bodhan</div>
+      <span style='font-size:0.9rem;font-weight:800;color:#FB923C;'>{_q_rej_bo:,}</span>
+    </div>
+  </div>''' if _q_rejected > 0 else ''}
 </div>""", unsafe_allow_html=True)
 
         with _qb2:
@@ -2033,53 +2326,88 @@ if not st.session_state.get("show_summary"):
             st.markdown(f"<div style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;'>Top Issue Types</div>", unsafe_allow_html=True)
         st.plotly_chart(_fig_issues, use_container_width=True, config={"displayModeBar": False})
 
+        # ── Enhanced Sample Viewer Buttons with Visual Picker ─────────────
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        st.markdown(f"""
+<div style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;
+            letter-spacing:0.08em;margin-bottom:8px;'>📸 Sample Image Viewer</div>
+""", unsafe_allow_html=True)
 
-        # ── Row 4: Flagged page heatmap (page position histogram) ─────────
-        _all_flagged_pages: list[int] = []
-        for _pv in filtered["flagged_pages_vs"].dropna():
-            if isinstance(_pv, list):
-                _all_flagged_pages.extend([int(p) for p in _pv if str(p).isdigit() or isinstance(p, (int, float))])
-        for _pb in filtered["flagged_pages_bodhan"].dropna():
-            if isinstance(_pb, list):
-                _all_flagged_pages.extend([int(p) for p in _pb if str(p).isdigit() or isinstance(p, (int, float))])
+        _qc1, _qc2, _qc3 = st.columns(3)
 
-        _DEMO_PAGES = [1,1,1,2,2,3,4,5,5,6,8,10,10,10,11,12,15,15,18,20,20,23,23,25,30,35,45]
-        _is_demo_pages = not bool(_all_flagged_pages)
-        _page_src = _all_flagged_pages if _all_flagged_pages else _DEMO_PAGES
-        _page_ser = pd.Series(_page_src)
-        _max_pg = min(_page_ser.max(), 60)
-        _page_hist = _page_ser[_page_ser <= _max_pg].value_counts().sort_index()
-        _fig_pages = go.Figure(go.Bar(
-            x=_page_hist.index,
-            y=_page_hist.values,
-            marker_color="#F43F5E" if not _is_demo_pages else "rgba(244,63,94,0.3)",
-            marker_opacity=0.75,
-        ))
-        _pages_layout = chart_layout(height=110)
-        _pages_layout["margin"] = dict(l=0, r=0, t=0, b=0)
-        _fig_pages.update_layout(**_pages_layout)
-        _fig_pages.update_xaxes(title_text="Page #", title_font=dict(size=10), tickfont=dict(size=9))
-        _fig_pages.update_yaxes(title_text="Flags", title_font=dict(size=10), tickfont=dict(size=9))
-        if _is_demo_pages:
-            st.markdown(f"""
-<div style='display:flex;align-items:center;gap:6px;margin-bottom:4px;'>
-  <span style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;'>Flagged Page Distribution</span>
-  <span style='background:rgba(244,63,94,0.12);color:#F43F5E;font-size:0.6rem;font-weight:600;
-               padding:1px 7px;border-radius:8px;border:1px solid rgba(244,63,94,0.25);'>placeholder — to be updated</span>
-</div>""", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;'>Flagged Page Distribution</div>", unsafe_allow_html=True)
-        st.plotly_chart(_fig_pages, use_container_width=True, config={"displayModeBar": False})
+        # Style for the viewer buttons
+        st.markdown(f"""
+<style>
+div[data-testid="stButton"]:has(button[key="qa_view_accepted"]) button {{
+    background: linear-gradient(135deg, rgba(52,211,153,0.15), rgba(52,211,153,0.05)) !important;
+    border: 1px solid rgba(52,211,153,0.3) !important;
+    color: #34D399 !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    padding: 8px 10px !important;
+    height: auto !important;
+    white-space: normal !important;
+    transition: all 0.2s ease !important;
+    font-size: 0.8rem !important;
+    line-height: 1.3 !important;
+}}
+div[data-testid="stButton"]:has(button[key="qa_view_accepted"]) button:hover {{
+    background: linear-gradient(135deg, rgba(52,211,153,0.25), rgba(52,211,153,0.15)) !important;
+    border-color: rgba(52,211,153,0.5) !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 12px rgba(52,211,153,0.3) !important;
+}}
+div[data-testid="stButton"]:has(button[key="qa_view_rejected"]) button {{
+    background: linear-gradient(135deg, rgba(244,63,94,0.15), rgba(244,63,94,0.05)) !important;
+    border: 1px solid rgba(244,63,94,0.3) !important;
+    color: #F43F5E !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    padding: 8px 10px !important;
+    height: auto !important;
+    white-space: normal !important;
+    transition: all 0.2s ease !important;
+    font-size: 0.8rem !important;
+    line-height: 1.3 !important;
+}}
+div[data-testid="stButton"]:has(button[key="qa_view_rejected"]) button:hover {{
+    background: linear-gradient(135deg, rgba(244,63,94,0.25), rgba(244,63,94,0.15)) !important;
+    border-color: rgba(244,63,94,0.5) !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 12px rgba(244,63,94,0.3) !important;
+}}
+div[data-testid="stButton"]:has(button[key="qa_view_flagged"]) button {{
+    background: linear-gradient(135deg, rgba(251,191,36,0.15), rgba(251,191,36,0.05)) !important;
+    border: 1px solid rgba(251,191,36,0.3) !important;
+    color: #FBBF24 !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    padding: 8px 10px !important;
+    height: auto !important;
+    white-space: normal !important;
+    transition: all 0.2s ease !important;
+    font-size: 0.8rem !important;
+    line-height: 1.3 !important;
+}}
+div[data-testid="stButton"]:has(button[key="qa_view_flagged"]) button:hover {{
+    background: linear-gradient(135deg, rgba(251,191,36,0.25), rgba(251,191,36,0.15)) !important;
+    border-color: rgba(251,191,36,0.5) !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 12px rgba(251,191,36,0.3) !important;
+}}
+</style>""", unsafe_allow_html=True)
 
-        # ── Deeplink button → Sample Checker pre-filtered to flagged/rejected ─
-        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        _qc1, _qc2 = st.columns(2)
-        if _qc1.button("🔍 View Rejected Samples →", key="qa_view_rejected", use_container_width=True):
+        if _qc1.button(f"✓ Accepted ({_q_accepted:,})", key="qa_view_accepted", use_container_width=True, help="Browse accepted samples"):
+            st.session_state["show_sample_checker"] = True
+            st.session_state["sc_quality_preset"] = "clean"
+            st.rerun()
+
+        if _qc2.button(f"✗ Rejected ({_q_rejected:,})", key="qa_view_rejected", use_container_width=True, help="Browse rejected samples with issues"):
             st.session_state["show_sample_checker"] = True
             st.session_state["sc_quality_preset"] = "rejected"
             st.rerun()
-        if _qc2.button("⚠️ View Flagged Samples →", key="qa_view_flagged", use_container_width=True):
+
+        if _qc3.button(f"⚠ Flagged ({_q_issues:,})", key="qa_view_flagged", use_container_width=True, help="Browse samples with quality issues"):
             st.session_state["show_sample_checker"] = True
             st.session_state["sc_quality_preset"] = "flagged"
             st.rerun()
@@ -2695,7 +3023,7 @@ if st.session_state.get("show_summary"):
                   border-radius:14px;padding:18px 20px;'>
         <div style='font-size:0.7rem;font-weight:700;color:#F43F5E;text-transform:uppercase;letter-spacing:0.1em;'>Deadline</div>
         <div style='font-size:2rem;font-weight:800;color:{_dl_clr};margin-top:8px;line-height:1;'>{_days_left}</div>
-        <div style='font-size:0.72rem;color:{_text2};margin-top:6px;'>days · 31 May 2026</div>
+        <div style='font-size:0.72rem;color:{_text2};margin-top:6px;'>days · 5 Jul 2026</div>
       </div>
 
     </div>
@@ -2741,7 +3069,7 @@ if st.session_state.get("show_summary"):
 
     # ── Target definitions (overall total comes from targets.json) ──
     PHASE1_TOTAL_PAGES = _PHASE1_TOTAL_PAGES_FULL
-    PHASE1_DEADLINE = pd.Timestamp("2026-05-31", tz="Asia/Kolkata")
+    PHASE1_DEADLINE = pd.Timestamp("2026-07-05", tz="Asia/Kolkata")
 
     # Overall class-level targets: 20L split equally across 4 class levels → 5L each
     _overall_lvl_pages = round(_PHASE1_TOTAL_PAGES_FULL / 4)  # 5,00,000
@@ -3386,13 +3714,56 @@ if st.session_state.get("show_summary"):
         districts=("district", "nunique"),
     ).reset_index().sort_values("pages", ascending=False)
 
+    # ── State-wise Target Progress (Phase 1) ─────────────────────────────────
+    st.markdown(f"""
+<div style='background:{_bg2};border:1px solid {_border_card};border-radius:16px;
+            padding:20px 24px 16px;margin-bottom:24px;'>
+  <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;'>
+    <div style='font-size:0.9rem;font-weight:700;color:{_text};'>Phase 1 State Targets
+      <span style='font-size:0.72rem;font-weight:500;color:{_text4};margin-left:8px;'>
+        2,00,000 pages each · Deadline: 5 Jul 2026</span></div>
+    <div style='font-size:0.7rem;font-weight:600;color:{_dl_clr};'>{_days_left}d remaining</div>
+  </div>
+  <div style='display:grid;grid-template-columns:repeat(2,1fr);gap:14px 28px;'>""", unsafe_allow_html=True)
+    for _slabel, _snames, _starget in _STATE_TARGET_ROWS:
+        _spages = int(df[df["state"].isin(_snames)]["num_pages"].sum())
+        _spct   = min(_spages / _starget * 100, 100) if _starget else 0
+        _sclr   = "#10B981" if _spct >= 100 else "#F59E0B" if _spct >= 60 else "#F43F5E"
+        _sremain = max(_starget - _spages, 0)
+        st.markdown(f"""
+    <div>
+      <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;'>
+        <span style='font-size:0.8rem;font-weight:600;color:{_text3};'>{_slabel}</span>
+        <span style='font-size:0.75rem;font-weight:800;color:{_sclr};'>{_spct:.1f}%</span>
+      </div>
+      <div style='background:{_progress_track};border-radius:6px;height:10px;overflow:hidden;'>
+        <div style='width:{_spct:.1f}%;background:linear-gradient(90deg,{_sclr}cc,{_sclr});
+                    height:100%;border-radius:6px;box-shadow:0 0 8px {_sclr}44;'></div>
+      </div>
+      <div style='display:flex;justify-content:space-between;margin-top:3px;'>
+        <span style='font-size:0.65rem;color:{_text2};'>{_spages:,} pages collected</span>
+        <span style='font-size:0.65rem;color:{_text4};'>{_sremain:,} remaining</span>
+      </div>
+    </div>""", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+    # ── Pages by State chart with target annotation ─────────────────────────
     sl1, sl2 = st.columns(2)
     with sl1:
-        _fig = go.Figure(go.Bar(
+        _target_states_set = {s for _, names, _ in _STATE_TARGET_ROWS for s in names}
+        _fig = go.Figure()
+        _fig.add_trace(go.Bar(
             x=state_stats["state"], y=state_stats["pages"],
             marker_color=C_INDIGO,
             text=[f"{p:,}" for p in state_stats["pages"]], textposition="outside", textfont=_bar_textfont,
         ))
+        _has_target_states = any(s in _target_states_set for s in state_stats["state"])
+        if _has_target_states:
+            _fig.add_hline(
+                y=200_000, line_dash="dash", line_color="#F59E0B", line_width=1.5,
+                annotation_text="2L target", annotation_position="top right",
+                annotation_font=dict(size=10, color="#F59E0B"),
+            )
         _fig.update_layout(**chart_layout(title="Pages by State"))
         st.plotly_chart(_fig, use_container_width=True)
 
@@ -4071,6 +4442,150 @@ if st.session_state.get("show_summary"):
                 _dist_stats[["distributor", "pages", "students", "schools", "districts", "pg_per_student", "records"]],
                 hide_index=True, use_container_width=True,
             )
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # UPLOAD TIMELINE & REVIEW TURNAROUND
+    # ══════════════════════════════════════════════════════════════════════════════
+
+    section("Upload Timeline & Review Turnaround")
+
+    _tl_c1, _tl_c2 = st.columns(2)
+
+    with _tl_c1:
+        # Daily upload pace by file_number sequence
+        _tl_df = filtered[filtered["date"].notna()].copy()
+        _tl_df["upload_date"] = _tl_df["date"].dt.tz_convert("Asia/Kolkata").dt.date
+        _daily = (
+            _tl_df.groupby("upload_date")
+            .agg(uploads=("file_number", "count"), pages=("num_pages", "sum"))
+            .reset_index()
+        )
+        _daily["upload_date"] = pd.to_datetime(_daily["upload_date"])
+        _fig_tl = go.Figure()
+        _fig_tl.add_trace(go.Bar(
+            x=_daily["upload_date"], y=_daily["uploads"],
+            name="Uploads", marker_color=C_INDIGO, opacity=0.85,
+            hovertemplate="%{x|%d %b}: %{y} uploads<extra></extra>",
+        ))
+        _fig_tl.add_trace(go.Scatter(
+            x=_daily["upload_date"], y=_daily["pages"],
+            name="Pages", yaxis="y2", line=dict(color="#F9A8D4", width=2),
+            hovertemplate="%{x|%d %b}: %{y:,} pages<extra></extra>",
+        ))
+        _tl_layout = chart_layout(title="Daily Uploads & Pages", height=280)
+        for _k in ("yaxis", "legend"):
+            _tl_layout.pop(_k, None)
+        _fig_tl.update_layout(
+            **_tl_layout,
+            yaxis=dict(title="Uploads", color=_chart_text),
+            yaxis2=dict(title="Pages", overlaying="y", side="right", color="#F9A8D4", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            barmode="overlay",
+        )
+        st.plotly_chart(_fig_tl, use_container_width=True, config={"displayModeBar": False})
+
+    with _tl_c2:
+        # Review turnaround: hours between createdAt and reviewedAt
+        _rt_df = filtered[filtered["reviewed_at"].notna() & filtered["date"].notna()].copy()
+        if len(_rt_df):
+            _rt_df["turnaround_hrs"] = (_rt_df["reviewed_at"] - _rt_df["date"]).dt.total_seconds() / 3600
+            _rt_df = _rt_df[_rt_df["turnaround_hrs"] >= 0]
+            _rt_mean = round(_rt_df["turnaround_hrs"].mean(), 1)
+            _rt_med  = round(_rt_df["turnaround_hrs"].median(), 1)
+            _rt_min  = round(_rt_df["turnaround_hrs"].min(), 1)
+            _rt_max  = round(_rt_df["turnaround_hrs"].max(), 1)
+
+            st.markdown(f"""
+<div style='display:flex;gap:8px;margin-bottom:8px;'>
+  <div style='flex:1;background:{_bg3};border:1px solid {_border_card};border-radius:10px;padding:10px;text-align:center;'>
+    <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Median</div>
+    <div style='font-size:1.3rem;font-weight:800;color:#818CF8;'>{_rt_med}h</div>
+  </div>
+  <div style='flex:1;background:{_bg3};border:1px solid {_border_card};border-radius:10px;padding:10px;text-align:center;'>
+    <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Mean</div>
+    <div style='font-size:1.3rem;font-weight:800;color:#34D399;'>{_rt_mean}h</div>
+  </div>
+  <div style='flex:1;background:{_bg3};border:1px solid {_border_card};border-radius:10px;padding:10px;text-align:center;'>
+    <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Fastest</div>
+    <div style='font-size:1.3rem;font-weight:800;color:#FBBF24;'>{_rt_min}h</div>
+  </div>
+  <div style='flex:1;background:{_bg3};border:1px solid {_border_card};border-radius:10px;padding:10px;text-align:center;'>
+    <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Slowest</div>
+    <div style='font-size:1.3rem;font-weight:800;color:#F43F5E;'>{_rt_max}h</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            # Histogram of turnaround hours (capped at 500h for readability)
+            _rt_cap = _rt_df[_rt_df["turnaround_hrs"] <= 500]["turnaround_hrs"]
+            _fig_rt = go.Figure(go.Histogram(
+                x=_rt_cap, nbinsx=30,
+                marker_color=C_INDIGO, opacity=0.8,
+                hovertemplate="~%{x:.0f}h: %{y} files<extra></extra>",
+            ))
+            _fig_rt.add_vline(x=_rt_med, line_dash="dash", line_color="#34D399",
+                annotation_text=f"median {_rt_med}h", annotation_position="top right",
+                annotation_font_color="#34D399")
+            _fig_rt.update_layout(**chart_layout(title="Review Turnaround Distribution", height=220),
+                xaxis_title="Hours to Approve", yaxis_title="Files")
+            st.plotly_chart(_fig_rt, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.info("No review turnaround data available.")
+
+    # ── Place (city/town/village) breakdown ───────────────────────────────────
+    _pl_df = filtered[filtered["place"].notna() & (filtered["place"] != "")].copy()
+    if len(_pl_df):
+        _place_stats = (
+            _pl_df.groupby(["state", "place"])
+            .agg(uploads=("file_number", "count"), pages=("num_pages", "sum"), students=("student_id", "nunique"))
+            .reset_index()
+            .sort_values("uploads", ascending=False)
+            .head(20)
+        )
+        _place_stats["label"] = _place_stats["place"] + " (" + _place_stats["state"] + ")"
+        _fig_pl = go.Figure(go.Bar(
+            x=_place_stats["uploads"],
+            y=_place_stats["label"],
+            orientation="h",
+            marker_color=C_VIOLET,
+            text=_place_stats["uploads"], textposition="outside", textfont=_bar_textfont,
+            customdata=_place_stats[["pages", "students"]],
+            hovertemplate="%{y}<br>Uploads: %{x}<br>Pages: %{customdata[0]:,}<br>Students: %{customdata[1]}<extra></extra>",
+        ))
+        _fig_pl.update_layout(**chart_layout(
+            title="Top 20 Places (City / Town / Village)",
+            height=120 + len(_place_stats) * 26,
+            margin=dict(l=0, r=50, t=32, b=4),
+        ))
+        _fig_pl.update_xaxes(visible=False)
+        _fig_pl.update_yaxes(tickfont=dict(size=11))
+        st.plotly_chart(_fig_pl, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Metadata flags ─────────────────────────────────────────────────────────
+    _mf_c1, _mf_c2 = st.columns(2)
+    with _mf_c1:
+        _gm_counts = filtered["generate_metadata"].value_counts()
+        _fig_gm = go.Figure(go.Pie(
+            labels=[("Auto-generated" if l else "Manual") for l in _gm_counts.index],
+            values=_gm_counts.values,
+            hole=0.55,
+            marker=dict(colors=["#34D399", "#6B7280"]),
+            textinfo="percent+label",
+            hovertemplate="%{label}: %{value:,} (%{percent})<extra></extra>",
+        ))
+        _fig_gm.update_layout(**chart_layout(title="Metadata Generation", height=240, showlegend=False))
+        st.plotly_chart(_fig_gm, use_container_width=True, config={"displayModeBar": False})
+    with _mf_c2:
+        _db_counts = filtered["data_bucket"].value_counts()
+        _fig_db = go.Figure(go.Pie(
+            labels=[("In Data Bucket" if l else "Not in Bucket") for l in _db_counts.index],
+            values=_db_counts.values,
+            hole=0.55,
+            marker=dict(colors=["#818CF8", "#6B7280"]),
+            textinfo="percent+label",
+            hovertemplate="%{label}: %{value:,} (%{percent})<extra></extra>",
+        ))
+        _fig_db.update_layout(**chart_layout(title="Data Bucket Flag", height=240, showlegend=False))
+        st.plotly_chart(_fig_db, use_container_width=True, config={"displayModeBar": False})
 
     # ══════════════════════════════════════════════════════════════════════════════
 

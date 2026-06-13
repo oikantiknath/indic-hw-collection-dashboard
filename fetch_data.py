@@ -2,11 +2,9 @@
 """
 fetch_data.py — run by cron every 6 hours.
 
-Fetches all student JSON metadata from MinIO, counts PDF pages (with a
-persistent local cache so each PDF is only downloaded once), normalises
-fields exactly as app.py does, and writes the result to data_cache.parquet.
-The Streamlit app reads that file; if it is missing it falls back to a live
-bucket load.
+Reads approved_uploads.csv (the approved set), normalises fields exactly as
+app.py does, and writes the result to data_cache.parquet.
+The Streamlit app reads that file; if it is missing it falls back to a live load.
 """
 
 import json
@@ -24,10 +22,7 @@ from mappings import (
     SUBJECT_MAP, SAMPLE_TYPE_MAP, GENDER_MAP, BOARD_MAP,
     BLOCK_MAP, SCHOOL_NORMALIZATIONS, SUBJ_CAT_MAP, fuzzy_subject,
 )
-from s3_helpers import (
-    _s3, load_page_cache, save_page_cache, count_pdf_pages,
-    MINIO_BUCKET, MINIO_PREFIX,
-)
+from s3_helpers import MINIO_PREFIX
 
 load_dotenv()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -35,6 +30,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 BASE_DIR        = Path(__file__).parent
 CACHE_PARQUET   = BASE_DIR / "data_cache.parquet"
 LAST_UPDATED    = BASE_DIR / ".last_updated.json"
+APPROVED_CSV    = BASE_DIR / "ref" / "approved_uploads.csv"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,99 +45,79 @@ log = logging.getLogger(__name__)
 _UNKNOWN_VALUES = {"", "unknown", "none", "null", "nan"}
 
 
-def _normalise(val: str, default: str = "not mentioned") -> str:
+def _normalise(val, default: str = "not mentioned") -> str:
     v = str(val or "").lower().strip()
     return default if v in _UNKNOWN_VALUES else v
 
 
+def _grade_num(val):
+    try:
+        return int(str(val).replace("Grade", "").strip())
+    except Exception:
+        return None
+
+
 # ── Main fetch ────────────────────────────────────────────────────────────────
 def fetch() -> pd.DataFrame:
-    s3 = _s3()
-    page_cache = load_page_cache()
-    cache_dirty = False
-
-    log.info("Listing bucket objects…")
-    json_keys: list[str] = []
-    pdf_sizes: dict[str, int] = {}
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=MINIO_BUCKET, Prefix=MINIO_PREFIX):
-        for obj in page.get("Contents", []):
-            k = obj["Key"]
-            if k.endswith(".json"):
-                json_keys.append(k)
-            elif k.endswith(".pdf"):
-                pdf_sizes[k] = obj["Size"]
-
-    log.info(f"Found {len(json_keys)} records, {len(pdf_sizes)} PDFs")
+    log.info(f"Reading approved CSV: {APPROVED_CSV}")
+    raw = pd.read_csv(APPROVED_CSV)
+    log.info(f"Loaded {len(raw)} approved records")
 
     rows = []
-    new_pdfs = [k[:-5] + ".pdf" for k in json_keys if (k[:-5] + ".pdf") not in page_cache]
-    if new_pdfs:
-        log.info(f"Downloading {len(new_pdfs)} new PDFs to count pages…")
-
-    for i, key in enumerate(json_keys, 1):
-        try:
-            meta = json.loads(
-                s3.get_object(Bucket=MINIO_BUCKET, Key=key)["Body"].read()
-            )
-        except Exception as e:
-            log.warning(f"Skipping {key}: {e}")
-            continue
-
-        pdf_key  = key[:-5] + ".pdf"
-        pdf_size = pdf_sizes.get(pdf_key, 0)
-        if pdf_key not in page_cache:
-            cache_dirty = True
-        num_pages = count_pdf_pages(s3, pdf_key, pdf_size, page_cache, exact=True)
-
-        if i % 50 == 0:
-            log.info(f"  Processed {i}/{len(json_keys)} records…")
-
-        grade     = meta.get("grade")
-        state_raw = str(meta.get("state") or "").lower().strip()
-        lang_prim = str(meta.get("language_primary") or "").strip().title()
+    for i, r in raw.iterrows():
+        grade     = _grade_num(r.get("classGrade"))
+        state_raw = str(r.get("state") or "").lower().strip().replace(" ", "_")
+        medium    = str(r.get("medium") or "not mentioned").strip().title()
+        distributor_raw = str(r.get("uploadedByUserId") or "Not Mentioned").strip()
+        distributor = distributor_raw.split("@")[0].strip() if "@" in distributor_raw else distributor_raw
 
         rows.append({
-            "pdf_key":               pdf_key,
-            "student_name":          str(meta.get("student_name") or "not mentioned").strip(),
-            "student_id":            str(meta.get("student_id")   or ""),
-            "unique_file_id":        str(meta.get("unique_file_id") or ""),
-            "school_id":             str(meta.get("school_id")    or ""),
-            "gender":                _normalise(meta.get("gender")),
-            "class":                 int(grade) if grade else None,
-            "class_level":           CLASS_LEVEL_FROM_GRADE.get(int(grade), "Unknown") if grade else "Unknown",
-            "school_name":           str(meta.get("school_name")   or "").strip(),
-            "school_type":           str(meta.get("school_type")   or "").strip(),
-            "board":                 _normalise(meta.get("board")),
-            "block":                 _normalise(meta.get("city_town_village")),
-            "district":              str(meta.get("district")      or "").strip().title(),
-            "state":                 state_raw.replace("_", " ").title() or "Unknown",
-            "regional_language":     lang_prim or STATE_TO_LANGUAGE.get(state_raw, "Unknown"),
-            "medium_of_instruction": str(meta.get("medium_of_instruction") or "not mentioned").strip().title(),
-            "subject":               str(meta.get("subject") or "").lower().strip(),
-            "sample_type":           str(meta.get("source_type") or "").lower().strip(),
-            "num_pages":             num_pages,
-            "date":                  pd.to_datetime(meta.get("uploaded_at"), errors="coerce", utc=True),
-            "distributor":           (lambda v: v.split("@")[0].strip() if "@" in v else v)(str(meta.get("distributor") or meta.get("uploaded_by") or meta.get("collector_name") or meta.get("data_collector") or "Not Mentioned").strip()),
-            "rural_urban":           str(meta.get("rural_urban") or "").strip().title(),
-            "aspirational_district": meta.get("aspirational_district", False),
-            "curriculum_type":       str(meta.get("curriculum_type") or "").strip(),
-            "performance_group":     str(meta.get("performance_group") or "").strip() or "Not Mentioned",
-            "capture_device":        str(meta.get("capture_device") or "").strip(),
-            "orientation":           str(meta.get("orientation") or "").strip(),
-            "handedness":            _normalise(meta.get("handedness")),
-            "handwritten_or_handdrawn": str(meta.get("handwritten_or_handdrawn") or "").lower().strip(),
-            "printed":               str(meta.get("printed")       or "").lower().strip(),
-            "mixed_content":         str(meta.get("mixed_content")  or "").lower().strip(),
-            "rotation":              str(meta.get("rotation")       or "").lower().strip(),
+            "pdf_key":                  MINIO_PREFIX + str(r.get("s3Key") or ""),
+            "student_name":             "not mentioned",
+            "student_id":               str(r.get("studentId") or ""),
+            "unique_file_id":           str(r.get("id") or ""),
+            "school_id":                str(r.get("schoolId") or ""),
+            "gender":                   _normalise(r.get("gender")),
+            "class":                    grade,
+            "class_level":              CLASS_LEVEL_FROM_GRADE.get(grade, "Unknown") if grade else "Unknown",
+            "school_name":              str(r.get("schoolName") or "").strip(),
+            "school_type":              "",
+            "board":                    _normalise(r.get("board")),
+            "block":                    _normalise(r.get("block")),
+            "district":                 str(r.get("district") or "").strip().title(),
+            "state":                    state_raw.replace("_", " ").title() or "Unknown",
+            "regional_language":        medium if medium not in ("Not Mentioned", "") else STATE_TO_LANGUAGE.get(state_raw, "Unknown"),
+            "medium_of_instruction":    medium,
+            "subject":                  str(r.get("subject") or "").lower().strip(),
+            "sample_type":              str(r.get("sampleType") or "").lower().strip(),
+            "num_pages":                int(r.get("pageCount") or 1),
+            "date":                     pd.to_datetime(r.get("createdAt"), errors="coerce", utc=True),
+            "distributor":              distributor,
+            "rural_urban":              "",
+            "aspirational_district":    bool(r.get("aspirationalDistrict", False)),
+            "curriculum_type":          "",
+            "performance_group":        "Not Mentioned",
+            "capture_device":           str(r.get("captureDevice") or "").strip(),
+            "orientation":              str(r.get("orientation") or "").strip(),
+            "handedness":               _normalise(r.get("dominantHand")),
+            "handwritten_or_handdrawn": str(r.get("handwritten") or "").lower().strip(),
+            "printed":                  str(r.get("printed") or "").lower().strip(),
+            "mixed_content":            str(r.get("mixedContent") or "").lower().strip(),
+            "rotation":                 str(r.get("rotation") or "").lower().strip(),
+            "reject_stage":             "null",
+            "review_flag":              "stage_vs",
+            "place":                    str(r.get("place") or "").strip().title(),
+            "file_number":              int(r.get("fileNumber") or 0),
+            "reviewed_at":              pd.to_datetime(r.get("reviewedAt"), errors="coerce", utc=True),
+            "generate_metadata":        bool(r.get("generateMetadata", False)),
+            "data_bucket":              bool(r.get("data_bucket", False)),
         })
 
-    if cache_dirty:
-        save_page_cache(page_cache)
-        log.info("Page cache updated.")
+        if (i + 1) % 500 == 0:
+            log.info(f"  Processed {i + 1}/{len(raw)} records…")
 
     if not rows:
-        log.warning("No records loaded from bucket.")
+        log.warning("No records loaded.")
         return pd.DataFrame()
 
     data = pd.DataFrame(rows)

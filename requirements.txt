@@ -1,0 +1,8 @@
+boto3
+numpy
+pandas
+plotly
+pypdf
+python-dotenv
+streamlit
+urllib3
