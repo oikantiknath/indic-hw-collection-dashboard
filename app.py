@@ -671,8 +671,8 @@ components.html(f"""
 # DATA LOADING & CLEANING
 # ══════════════════════════════════════════════════════════════════════════════
 
-_APPROVED_CSV  = Path("/home/oikantiknath/oikantik_vm/vs_code/data-upload/approved_uploads.csv")
-_ANNOTATION_DB = Path("/home/oikantiknath/oikantik_vm/vs_code/ui-annotation-verification/annotation.db")
+_APPROVED_CSV  = Path(os.environ["APPROVED_CSV_PATH"])
+_ANNOTATION_DB = Path(os.environ["ANNOTATION_DB_PATH"])
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -691,12 +691,49 @@ def render_pdf_page_as_png(pdf_key: str, page_number: int) -> bytes | None:
         idx = page_number - 1
         if idx < 0 or idx >= len(doc):
             return None
-        page = doc[idx]
-        mat = fitz.Matrix(2.0, 2.0)  # 2× zoom → ~144 dpi, sharp but not huge
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-        return pix.tobytes("png")
+        pix = doc[idx].get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+        return pix.tobytes("jpeg", jpg_quality=82)
     except Exception:
         return None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def render_all_flagged_pages(pdf_key: str, page_numbers: tuple) -> dict:
+    """Download PDF once, render all flagged pages in parallel. Returns {page_num: jpeg_bytes}."""
+    import concurrent.futures
+    try:
+        s3 = _s3()
+        buf = io.BytesIO()
+        s3.download_fileobj(MINIO_BUCKET, pdf_key, buf)
+        pdf_bytes = buf.getvalue()
+
+        # 1.5× zoom — still sharp at display width, ~2× faster than 2.0×
+        mat = fitz.Matrix(1.5, 1.5)
+
+        def _render(pg: int) -> tuple:
+            try:
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                idx = pg - 1
+                if idx < 0 or idx >= len(doc):
+                    return pg, None
+                pix = doc[idx].get_pixmap(matrix=mat, alpha=False)
+                # JPEG: ~5× smaller than PNG, renders faster in browser
+                return pg, pix.tobytes("jpeg", jpg_quality=82)
+            except Exception:
+                return pg, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = dict(pool.map(_render, page_numbers))
+
+        return {pg: data for pg, data in results.items() if data}
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_presigned_url_cached(pdf_key: str) -> tuple:
+    """Cache presigned URL so it isn't re-fetched on every rerun."""
+    return _presigned_url(pdf_key, expires=1800)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -761,15 +798,81 @@ def load_annotation_data() -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_raw_counts() -> dict:
-    """Return upload counts from approved_uploads.csv."""
+    """Total uploads from approved_uploads.csv (all reviewed PDFs)."""
     if not _APPROVED_CSV.exists():
-        return {"total": 0, "approved": 0, "pending_review": 0}
-    raw = pd.read_csv(_APPROVED_CSV, usecols=["reviewStatus"])
-    vc = raw["reviewStatus"].value_counts().to_dict()
+        return {"total": 0}
+    raw = pd.read_csv(_APPROVED_CSV, usecols=["id"])
+    return {"total": len(raw)}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_qa_counts() -> dict:
+    """QA review decisions from annotation.db.
+
+    Returns accepted (clean + w/issues), rejected, pending counts
+    relative to the full approved_uploads.csv list.
+    """
+    empty = {"total": 0, "reviewed": 0, "clean": 0, "with_issues": 0,
+             "approved": 0, "rejected": 0, "rejected_vs": 0, "rejected_bodhan": 0,
+             "pending": 0, "done_today": 0}
+    if not _APPROVED_CSV.exists() or not _ANNOTATION_DB.exists():
+        return empty
+
+    total = len(pd.read_csv(_APPROVED_CSV, usecols=["id"]))
+
+    conn = sqlite3.connect(str(_ANNOTATION_DB))
+    try:
+        rows = conn.execute(
+            "SELECT unique_file_id, pdf_decision, page_rejections, reviewer FROM pdf_annotations"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    clean = with_issues = rejected = rejected_vs = rejected_bodhan = 0
+    for uid, decision, page_rej_raw, reviewer in rows:
+        decision = (decision or "").strip().lower()
+        if decision == "accepted":
+            has_issues = False
+            try:
+                pages = _json.loads(page_rej_raw or "[]")
+                has_issues = any(len(p.get("issues", [])) > 0 for p in pages)
+            except Exception:
+                pass
+            if has_issues:
+                with_issues += 1
+            else:
+                clean += 1
+        elif decision == "rejected":
+            rejected += 1
+            rev = (reviewer or "").lower()
+            if "bodhan" in rev:
+                rejected_bodhan += 1
+            else:
+                rejected_vs += 1
+
+    approved = clean + with_issues
+    reviewed = approved + rejected
+    pending  = max(total - reviewed, 0)
+
+    # done today = annotations created today (IST)
+    try:
+        conn2 = sqlite3.connect(str(_ANNOTATION_DB))
+        today_str = pd.Timestamp.now(tz="Asia/Kolkata").strftime("%Y-%m-%d")
+        done_today = conn2.execute(
+            "SELECT COUNT(*) FROM pdf_annotations "
+            "WHERE pdf_decision IN ('accepted','rejected') AND created_at LIKE ?",
+            (today_str + "%",)
+        ).fetchone()[0]
+        conn2.close()
+    except Exception:
+        done_today = 0
+
     return {
-        "total":          len(raw),
-        "approved":       vc.get("APPROVED", 0),
-        "pending_review": vc.get("PENDING",  0),
+        "total": total, "reviewed": reviewed,
+        "clean": clean, "with_issues": with_issues,
+        "approved": approved, "rejected": rejected,
+        "rejected_vs": rejected_vs, "rejected_bodhan": rejected_bodhan,
+        "pending": pending, "done_today": done_today,
     }
 
 @st.cache_data(ttl=300, show_spinner="Loading approved data…")
@@ -963,6 +1066,7 @@ def _last_updated_str() -> str:
 
 # Load full upload counts (approved + unapproved) from raw CSV
 _raw_counts = load_raw_counts()
+_qa_counts  = load_qa_counts()
 
 # Prefer cached parquet (written by cron); fall back to live bucket load
 if CACHE_PARQUET.exists():
@@ -1290,6 +1394,171 @@ div[data-testid="stButton"]:has(button[key="toggle_theme"]) button {{
             st.session_state["dark_mode"] = not _dark
             st.rerun()
 
+# ── Issue color palette (shared: sample checker, quality chart, popup) ────────
+_ISSUE_COLORS = {
+    "reject_bleed_through":            "#FB923C",  # orange       (warm)
+    "reject_blur":                     "#818CF8",  # indigo       (cool)
+    "reject_lighting":                 "#FBBF24",  # amber        (warm)
+    "reject_sparsity":                 "#06B6D4",  # cyan         (cool)
+    "reject_rotation_mismatch":        "#E879F9",  # fuchsia      (vibrant)
+    "reject_subject_content_mismatch": "#F472B6",  # pink         (vibrant)
+    "reject_source_type_mismatch":     "#38BDF8",  # sky blue     (cool)
+    "reject_cutoff":                   "#A78BFA",  # violet       (cool)
+    "pii_flag":                        "#FCD34D",  # gold         (warm neutral)
+}
+
+def _issue_color(raw_key: str) -> str:
+    return _ISSUE_COLORS.get(raw_key.lower(), "#94A3B8")
+
+
+@st.dialog("PDF Viewer", width="large")
+def _sc_pdf_dialog(sc_row, pg_issue_map, flagged_pages, issue_counts, pdf_key_val,
+                   qs_label, qs_c, text, text2, text4, bg3, border_card, accent, accent_bg, accent_border):
+    # ── header + issues shown immediately, caching happens in parallel ────
+    cls_v = int(sc_row["class"]) if sc_row["class"] and not pd.isna(sc_row["class"]) else "?"
+    st.markdown(f"""
+<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;'>
+  <span style='background:{qs_c};color:#fff;font-size:0.7rem;font-weight:700;
+               padding:3px 12px;border-radius:10px;'>{qs_label}</span>
+  <span style='font-size:0.82rem;font-weight:700;color:{text};font-family:monospace;'>{sc_row["student_id"]}</span>
+  <span style='font-size:0.72rem;color:{text2};'>· Class {cls_v} · {str(sc_row["subject"]).title()} · {int(sc_row["num_pages"])} pages</span>
+  <span style='margin-left:auto;font-size:0.68rem;color:{text2};'>{str(sc_row["school_name"]).title()} · {sc_row["district"]}</span>
+</div>""", unsafe_allow_html=True)
+
+    if issue_counts:
+        st.markdown("<div style='font-size:0.6rem;font-weight:700;color:" + text2 +
+                    ";text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;'>Issues</div>",
+                    unsafe_allow_html=True)
+        st.markdown(
+            "<div style='display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;'>" +
+            "".join(
+                f"<span style='background:{_issue_color(k)}33;color:{_issue_color(k)};"
+                f"font-size:0.78rem;font-weight:700;padding:5px 14px;border-radius:10px;"
+                f"border:1.5px solid {_issue_color(k)}66;'>"
+                f"{k.replace('reject_','').replace('_',' ').title()}"
+                f"<span style='background:{_issue_color(k)};color:#000;border-radius:6px;"
+                f"padding:1px 7px;margin-left:8px;font-size:0.68rem;font-weight:800;'>{v}</span></span>"
+                for k, v in sorted(issue_counts.items(), key=lambda x: -x[1])
+            ) + "</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── "Flagged Pages" label + inline cache spinner side by side ─────────
+    if flagged_pages:
+        _fp_label_col, _fp_spin_col = st.columns([3, 5])
+        _fp_label_col.markdown(
+            f"<div style='font-size:0.6rem;font-weight:700;color:{text2};"
+            f"text-transform:uppercase;letter-spacing:0.08em;padding-top:6px;'>Flagged Pages</div>",
+            unsafe_allow_html=True,
+        )
+        # fetch URL (cached after first call)
+        _d_url, _d_err, _d_ext = get_presigned_url_cached(pdf_key_val)
+        # cache all pages — spinner shows only in the right column, rest of dialog already visible
+        with _fp_spin_col:
+            with st.spinner(f"Caching {len(flagged_pages)} page(s)…"):
+                _pages_cache = render_all_flagged_pages(pdf_key_val, tuple(sorted(flagged_pages)))
+    else:
+        _d_url, _d_err, _d_ext = get_presigned_url_cached(pdf_key_val)
+        _pages_cache = {}
+
+    # ── flagged page buttons + images ─────────────────────────────────────
+    if flagged_pages:
+
+        def _pg_color(pg):
+            issues = pg_issue_map.get(pg, [])
+            return _issue_color(issues[0]) if issues else "#94A3B8"
+
+        # target buttons by their st-key-{key} wrapper class — reliable in Streamlit 1.38+
+        _all_btn_css = "<style>"
+        for _pg in flagged_pages:
+            _c = _pg_color(_pg)
+            _active_now = (st.session_state.get("dlg_show_page") == _pg)
+            _bg     = f"{_c}44" if _active_now else f"{_c}18"
+            _border = f"{_c}cc" if _active_now else f"{_c}aa"
+            _all_btn_css += (
+                f".st-key-dlg_pg_{_pg} button {{"
+                f"background:{_bg}!important;border:1.5px solid {_border}!important;"
+                f"color:{_c}!important;font-weight:700!important;border-radius:8px!important;}}"
+                f".st-key-dlg_pg_{_pg} button:hover {{"
+                f"background:{_c}33!important;border-color:{_c}!important;}}"
+            )
+        _all_btn_css += "</style>"
+        st.markdown(_all_btn_css, unsafe_allow_html=True)
+
+        # page buttons row
+        _max_per_row = 12
+        for _row_start in range(0, len(flagged_pages), _max_per_row):
+            _row_pgs = flagged_pages[_row_start: _row_start + _max_per_row]
+            _pb_cols = st.columns(len(_row_pgs))
+            for _ci, _pg in enumerate(_row_pgs):
+                _active = (st.session_state.get("dlg_show_page") == _pg)
+                if _pb_cols[_ci].button(f"p.{_pg}", key=f"dlg_pg_{_pg}", use_container_width=True,
+                                        help=", ".join(i.replace("_"," ").title() for i in pg_issue_map.get(_pg, []))):
+                    st.session_state["dlg_show_page"] = None if _active else _pg
+                    st.session_state["dlg_show_full_pdf"] = False
+                    st.rerun()
+
+        # show selected page image
+        _sel_pg = st.session_state.get("dlg_show_page")
+        if _sel_pg:
+            _pg_issues_sel = pg_issue_map.get(_sel_pg, [])
+            _sel_chips = "".join(
+                f"<span style='background:{_issue_color(i)}33;color:{_issue_color(i)};"
+                f"font-size:0.65rem;font-weight:600;padding:2px 9px;border-radius:8px;"
+                f"border:1px solid {_issue_color(i)}66;'>{i.replace('reject_','').replace('_',' ').title()}</span>"
+                for i in dict.fromkeys(_pg_issues_sel)
+            ) or f"<span style='font-size:0.62rem;color:{text4};'>No issue label</span>"
+            _pg_color_sel = _pg_color(_sel_pg)
+            _hdr_col, _close_col = st.columns([8, 1])
+            _hdr_col.markdown(f"""
+<div style='border:1px solid {_pg_color_sel}44;border-radius:10px;overflow:hidden;margin:10px 0 8px;'>
+  <div style='background:{_pg_color_sel}11;padding:8px 14px;border-bottom:1px solid {_pg_color_sel}33;
+              display:flex;align-items:center;gap:10px;flex-wrap:wrap;'>
+    <span style='font-size:0.72rem;font-weight:700;color:{_pg_color_sel};'>Page {_sel_pg}</span>
+    {_sel_chips}
+  </div>
+</div>""", unsafe_allow_html=True)
+            if _close_col.button("✕", key="dlg_close_img", help="Close image"):
+                st.session_state["dlg_show_page"] = None
+                st.rerun()
+            _png = _pages_cache.get(_sel_pg)
+            if _png:
+                st.image(_png, use_container_width=True)
+            else:
+                with st.spinner(f"Rendering page {_sel_pg}…"):
+                    _png = render_pdf_page_as_png(pdf_key_val, _sel_pg)
+                if _png:
+                    st.image(_png, use_container_width=True)
+                else:
+                    st.warning(f"Could not render page {_sel_pg}.")
+
+    # ── View Full PDF toggle ──────────────────────────────────────────────
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    _show_full = st.session_state.get("dlg_show_full_pdf", False)
+    if st.button("📄  View Full PDF" if not _show_full else "▲  Hide Full PDF",
+                 key="dlg_toggle_pdf", use_container_width=False):
+        st.session_state["dlg_show_full_pdf"] = not _show_full
+        st.rerun()
+
+    if st.session_state.get("dlg_show_full_pdf") and _d_url and _d_ext == "pdf":
+        _jump = st.session_state.get("dlg_show_page")
+        _src = f"{_d_url}#page={_jump}" if _jump else _d_url
+        st.markdown(f"""
+<div style='border:1px solid {border_card};border-radius:10px;overflow:hidden;margin-top:8px;'>
+  <div style='background:#1E1E2E;padding:6px 14px;display:flex;align-items:center;
+              justify-content:space-between;border-bottom:1px solid {border_card};'>
+    <span style='font-size:0.72rem;color:{text2};font-weight:600;'>{pdf_key_val.split("/")[-1]}</span>
+    <a href="{_d_url}" target="_blank"
+       style='font-size:0.7rem;color:{accent};font-weight:600;text-decoration:none;
+              background:{accent_bg};padding:2px 10px;border-radius:6px;
+              border:1px solid {accent_border};'>↗ Open in new tab</a>
+  </div>
+  <iframe src="{_src}" width="100%" height="860" style="border:none;display:block;"></iframe>
+</div>""", unsafe_allow_html=True)
+    elif st.session_state.get("dlg_show_full_pdf") and _d_err:
+        st.error(f"Could not load PDF: {_d_err}")
+
+
 # ── Sample Checker Panel ──────────────────────────────────────────────────────
 if st.session_state["show_sample_checker"]:
     st.markdown('<div class="section-header">🔍 Sample Checker — PDF Viewer</div>', unsafe_allow_html=True)
@@ -1436,6 +1705,12 @@ if st.session_state["show_sample_checker"]:
         st.session_state["sc_page"] = 0
     if "sc_view_idx" not in st.session_state:
         st.session_state["sc_view_idx"] = None
+    if "sc_popup_pdf_url" not in st.session_state:
+        st.session_state["sc_popup_pdf_url"] = None
+    if "sc_popup_ext" not in st.session_state:
+        st.session_state["sc_popup_ext"] = None
+    if "sc_popup_show_page" not in st.session_state:
+        st.session_state["sc_popup_show_page"] = None
 
     # Reset to page 0 when filters change
     _sc_df_reset = _sc_df.reset_index(drop=True)
@@ -1454,241 +1729,50 @@ if st.session_state["show_sample_checker"]:
         _page_start = _cur_page * _SC_PAGE_SIZE
         _page_rows = _sc_df_reset.iloc[_page_start: _page_start + _SC_PAGE_SIZE]
 
-        # ── PDF viewer (shown above table when a record is selected) ───────
+        # ── Open dialog overlay when a row's View button is clicked ─────
         _view_idx = st.session_state.get("sc_view_idx")
         if _view_idx is not None and _view_idx < n_total:
-            _sc_row = _sc_df_reset.iloc[_view_idx]
+            _sc_row      = _sc_df_reset.iloc[_view_idx]
             _pdf_key_val = _sc_row["pdf_key"]
-            _cls_v = int(_sc_row["class"]) if _sc_row["class"] and not pd.isna(_sc_row["class"]) else "?"
-
-            st.markdown(f"<div style='height:1px;background:{_border_card};margin:8px 0 12px;'></div>", unsafe_allow_html=True)
-            _pdf_close_col, _ = st.columns([1, 8])
-            if _pdf_close_col.button("✕", key="sc_pdf_close", help="Close PDF"):
-                st.session_state["sc_view_idx"] = None
-                st.session_state["sc_jump_page"] = None
-                st.rerun()
-            # JSON metadata section disabled (files not available yet)
-            _json_section = ""
-
-            # ── Build quality banner for this record ──────────────────────
             _row_qs      = str(_sc_row.get("quality_status", "Pending"))
-            _row_issues  = list(_sc_row.get("issues_vs") or []) + list(_sc_row.get("issues_bodhan") or [])
-            _row_fp_vs   = list(_sc_row.get("flagged_pages_vs") or [])
-            _row_fp_bo   = list(_sc_row.get("flagged_pages_bodhan") or [])
-            _row_fp_all  = sorted(set([int(p) for p in (_row_fp_vs + _row_fp_bo)
-                                       if isinstance(p, (int, float))]))
-
-            _qs_colors = {
-                "Clean":             ("#34D399", "rgba(52,211,153,0.1)"),
-                "Accepted w/ Issues":("#FBBF24", "rgba(251,191,36,0.1)"),
-                "Rejected (VS)":     ("#F43F5E", "rgba(244,63,94,0.1)"),
-                "Rejected (Bodhan)": ("#FB923C", "rgba(251,146,60,0.1)"),
-                "Pending":           ("#6B7280", "rgba(107,114,128,0.1)"),
+            _pg_issue_map_vs = _sc_row.get("page_issues_map_vs") or {}
+            _popup_issue_counts: dict[str, int] = {}
+            for _piss in _pg_issue_map_vs.values():
+                for _iss in _piss:
+                    _popup_issue_counts[_iss] = _popup_issue_counts.get(_iss, 0) + 1
+            _row_fp_vs  = list(_sc_row.get("flagged_pages_vs")  or [])
+            _row_fp_bo  = list(_sc_row.get("flagged_pages_bodhan") or [])
+            _row_fp_all = sorted(set([int(p) for p in (_row_fp_vs + _row_fp_bo) if isinstance(p, (int, float))]))
+            _qs_c_map = {
+                "Clean":             "#34D399",
+                "Accepted w/ Issues":"#FBBF24",
+                "Rejected (VS)":     "#F43F5E",
+                "Rejected (Bodhan)": "#F43F5E",
+                "Pending":           "#6B7280",
             }
-            _qs_c, _qs_bg = _qs_colors.get(_row_qs, ("#6B7280", "rgba(107,114,128,0.1)"))
-
-            _issue_chips_html = ""
-            if _row_issues:
-                _issue_chips_html = "<div style='display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;'>" + "".join(
-                    f"<span style='background:{_qs_bg};color:{_qs_c};font-size:0.65rem;font-weight:600;"
-                    f"padding:2px 8px;border-radius:8px;border:1px solid {_qs_c}44;'>"
-                    f"{str(i).replace('_',' ').title()}</span>"
-                    for i in dict.fromkeys(_row_issues)
-                ) + "</div>"
-
-            _fp_label_html = ""
-            if _row_fp_vs:
-                _fp_label_html += f"<span style='font-size:0.62rem;color:{_text2};'>VS: </span>" + " ".join(
-                    f"<span style='background:rgba(244,63,94,0.15);color:#F43F5E;font-size:0.62rem;"
-                    f"padding:1px 6px;border-radius:6px;border:1px solid rgba(244,63,94,0.3);'>p.{p}</span>"
-                    for p in [int(x) for x in _row_fp_vs if isinstance(x, (int, float))]
-                )
-            if _row_fp_bo:
-                if _fp_label_html:
-                    _fp_label_html += "&nbsp;&nbsp;"
-                _fp_label_html += f"<span style='font-size:0.62rem;color:{_text2};'>Bodhan: </span>" + " ".join(
-                    f"<span style='background:rgba(251,146,60,0.15);color:#FB923C;font-size:0.62rem;"
-                    f"padding:1px 6px;border-radius:6px;border:1px solid rgba(251,146,60,0.3);'>p.{p}</span>"
-                    for p in [int(x) for x in _row_fp_bo if isinstance(x, (int, float))]
-                )
-
-            _quality_banner = ""
-            if _row_qs != "Pending":
-                _quality_banner = f"""
-<div style='background:{_qs_bg};border:1px solid {_qs_c}44;border-radius:10px;
-            padding:10px 14px;margin-bottom:8px;'>
-  <div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;'>
-    <span style='background:{_qs_c};color:{"#000" if _row_qs in ("Clean","Accepted w/ Issues") else "#fff"};
-                 font-size:0.65rem;font-weight:700;padding:2px 10px;border-radius:10px;'>{_row_qs}</span>
-    {_fp_label_html}
-  </div>
-  {_issue_chips_html}
-</div>"""
-
-            st.markdown(_quality_banner, unsafe_allow_html=True)
-
-            st.markdown(f"""
-<div style='background:{_bg2};border:1px solid {_border_card};
-     border-radius:10px;padding:10px 16px;margin:0 0 10px;'>
-  <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:8px;'>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Student ID</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};font-family:monospace;'>{str(_sc_row["student_id"])}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>File ID</div>
-         <div style='font-size:0.72rem;font-weight:600;color:{_text4};font-family:monospace;' title='{str(_sc_row["unique_file_id"])}'>{str(_sc_row["unique_file_id"])[:8]}…</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Class</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{_cls_v}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Subject</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["subject"]).title()}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>School</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["school_name"]).title()}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>District</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{_sc_row["district"]}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Block</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["block"]).title()}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Gender</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["gender"]).title()}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Pages</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{int(_sc_row["num_pages"])}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Date</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["date"])[:10] if pd.notna(_sc_row["date"]) else "—"}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Sample Type</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["sample_type"]).title()}</div></div>
-    <div><div style='font-size:0.6rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>State</div>
-         <div style='font-size:0.82rem;font-weight:600;color:{_text3};'>{str(_sc_row["state"])}</div></div>
-  </div>
-  {_json_section}
-</div>
-""", unsafe_allow_html=True)
-
-            with st.spinner("Fetching file…"):
-                _pdf_url, _pdf_err, _found_ext = _presigned_url(_pdf_key_val, expires=1800)
-
-            # ── Jump-to-page controls (flagged pages) ─────────────────────
-            if "sc_jump_page" not in st.session_state:
-                st.session_state["sc_jump_page"] = None
-            _jump_page = st.session_state.get("sc_jump_page")
-
-            if _found_ext == "pdf" and _row_fp_all:
-                st.markdown(f"""
-<div style='display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px;'>
-  <span style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;
-               letter-spacing:0.07em;'>Jump to flagged page:</span>""",
-                    unsafe_allow_html=True)
-                _jp_cols = st.columns(min(len(_row_fp_all), 10))
-                for _jci, _jpage in enumerate(_row_fp_all[:10]):
-                    if _jp_cols[_jci].button(f"p.{_jpage}", key=f"jp_{_view_idx}_{_jpage}"):
-                        st.session_state["sc_jump_page"] = _jpage
-                        _jump_page = _jpage
-                        st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
-
-            # ── Flagged page image preview (instant, no full-PDF wait) ────
-            if _jump_page and _found_ext == "pdf":
-                if "sc_show_page_preview" not in st.session_state:
-                    st.session_state["sc_show_page_preview"] = True
-                _preview_open = st.session_state["sc_show_page_preview"]
-                _prev_label = f"▲ Hide page {_jump_page} preview" if _preview_open else f"▼ Show page {_jump_page} preview"
-                st.markdown(f"""
-<style>
-div[data-testid="stButton"]:has(button[key="toggle_page_preview"]) button {{
-    background: {'rgba(251,191,36,0.15)' if _preview_open else _bg2} !important;
-    border: 1px solid {'rgba(251,191,36,0.45)' if _preview_open else 'rgba(251,191,36,0.25)'} !important;
-    color: #FBBF24 !important;
-    font-size: 0.7rem !important; font-weight: 700 !important;
-    letter-spacing: 0.06em !important; border-radius: 8px !important;
-    padding: 4px 14px !important;
-}}
-</style>""", unsafe_allow_html=True)
-                if st.button(_prev_label, key="toggle_page_preview"):
-                    st.session_state["sc_show_page_preview"] = not _preview_open
-                    st.rerun()
-
-                if st.session_state["sc_show_page_preview"]:
-                    with st.spinner(f"Rendering page {_jump_page}…"):
-                        _pg_png = render_pdf_page_as_png(_pdf_key_val, _jump_page)
-                    if _pg_png:
-                        _pg_issue_map = _sc_row.get("page_issues_map_vs") or {}
-                        _pg_issues = _pg_issue_map.get(_jump_page, [])
-                        _issue_chips = "".join(
-                            f"<span style='background:rgba(244,63,94,0.15);color:#F43F5E;"
-                            f"font-size:0.65rem;font-weight:600;padding:2px 9px;"
-                            f"border-radius:8px;border:1px solid rgba(244,63,94,0.3);'>"
-                            f"{str(i).replace('_',' ').title()}</span>"
-                            for i in dict.fromkeys(_pg_issues)
-                        ) if _pg_issues else (
-                            f"<span style='font-size:0.62rem;color:{_text4};'>No specific issue label recorded</span>"
-                        )
-                        st.markdown(f"""
-<div style='border:1px solid rgba(251,191,36,0.35);border-radius:10px;
-            overflow:hidden;margin-bottom:10px;'>
-  <div style='background:rgba(251,191,36,0.08);padding:8px 14px;
-              border-bottom:1px solid rgba(251,191,36,0.2);'>
-    <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;'>
-      <span style='font-size:0.7rem;font-weight:700;color:#FBBF24;'>Flagged page {_jump_page}</span>
-      <span style='font-size:0.62rem;color:{_text4};'>quick preview · full PDF below</span>
-    </div>
-    <div style='display:flex;flex-wrap:wrap;gap:5px;'>{_issue_chips}</div>
-  </div>
-</div>""", unsafe_allow_html=True)
-                        st.image(_pg_png, use_container_width=True)
-                    else:
-                        st.warning(f"Could not render page {_jump_page} — see full PDF below.")
-
-            _pdf_src = _pdf_url
-            if _jump_page and _pdf_url and _found_ext == "pdf":
-                _pdf_src = f"{_pdf_url}#page={_jump_page}"
-
-            if _pdf_url and _found_ext == "pdf":
-                _pdf_filename = _pdf_key_val.split("/")[-1]
-                _jump_badge = (
-                    f"<span style='margin-left:8px;background:rgba(251,191,36,0.15);"
-                    f"color:#FBBF24;font-size:0.68rem;font-weight:700;"
-                    f"padding:2px 8px;border-radius:6px;border:1px solid rgba(251,191,36,0.3);'>"
-                    f"p.{_jump_page}</span>"
-                ) if _jump_page else ""
-                st.markdown(f"""
-<div style='background:{_bg3};border:1px solid {_border_card};
-     border-radius:12px;overflow:hidden;box-shadow:0 8px 32px {_shadow};'>
-  <div style='background:{_bg2};padding:8px 14px;display:flex;
-       align-items:center;justify-content:space-between;border-bottom:1px solid {_border2};'>
-    <div style='display:flex;align-items:center;gap:6px;font-size:0.75rem;font-weight:600;color:{_text2};'>
-      📄 {_pdf_filename}{_jump_badge}
-    </div>
-    <a href="{_pdf_url}" target="_blank"
-       style='font-size:0.72rem;color:{_accent};text-decoration:none;font-weight:600;
-              background:{_accent_bg};padding:3px 10px;border-radius:6px;
-              border:1px solid {_accent_border};'>↗ View Full PDF</a>
-  </div>
-  <iframe src="{_pdf_src}" width="100%" height="900"
-          style="border:none;display:block;background:#fff;"></iframe>
-</div>
-""", unsafe_allow_html=True)
-            elif _pdf_url and _found_ext in ("png", "jpg", "jpeg", "tiff", "tif"):
-                st.warning(f"PDF not available — showing image file (.{_found_ext}) instead.")
-                st.markdown(f"""
-<div style='background:{_bg3};border:1px solid {_border_card};
-     border-radius:12px;overflow:hidden;box-shadow:0 8px 32px {_shadow};'>
-  <div style='background:{_bg2};padding:8px 14px;display:flex;
-       align-items:center;justify-content:space-between;border-bottom:1px solid {_border2};'>
-    <span style='font-size:0.75rem;font-weight:600;color:{_text2};'>🖼 {_pdf_key_val.split("/")[-1].replace(".pdf", f".{_found_ext}")}</span>
-    <a href="{_pdf_url}" target="_blank"
-       style='font-size:0.72rem;color:{_accent};text-decoration:none;font-weight:600;
-              background:{_accent_bg};padding:3px 10px;border-radius:6px;
-              border:1px solid {_accent_border};'>↗ View Full Image</a>
-  </div>
-  <img src="{_pdf_url}" style="width:100%;display:block;background:#fff;" />
-</div>
-""", unsafe_allow_html=True)
-            else:
-                st.error(f"PDF not found. Key: `{_pdf_key_val}`")
-                if _pdf_err:
-                    st.caption(f"Error: {_pdf_err}")
-
-            st.markdown(f"<div style='height:1px;background:{_border_card};margin:16px 0 12px;'></div>", unsafe_allow_html=True)
+            _qs_c     = _qs_c_map.get(_row_qs, "#6B7280")
+            _qs_label = "Rejected" if "Rejected" in _row_qs else _row_qs
+            # reset dialog-internal state only when a different row is opened
+            if st.session_state.get("_dlg_last_idx") != _view_idx:
+                st.session_state["dlg_show_page"]     = None
+                st.session_state["dlg_show_full_pdf"] = False
+                st.session_state["_dlg_last_idx"]     = _view_idx
+            _sc_pdf_dialog(
+                sc_row=_sc_row,
+                pg_issue_map=_pg_issue_map_vs,
+                flagged_pages=_row_fp_all,
+                issue_counts=_popup_issue_counts,
+                pdf_key_val=_pdf_key_val,
+                qs_label=_qs_label,
+                qs_c=_qs_c,
+                text=_text, text2=_text2, text4=_text4,
+                bg3=_bg3, border_card=_border_card,
+                accent=_accent, accent_bg=_accent_bg, accent_border=_accent_border,
+            )
 
         # ── Paginated table ────────────────────────────────────────────────
-        _tbl_cols   = ["#", "Student", "Cls", "Subject", "Pgs", "Status", "Flagged Pgs", "Date", ""]
-        _col_widths = [0.3, 1.1, 0.4, 0.9, 0.35, 0.9, 1.2, 0.65, 0.45]
+        _tbl_cols   = ["#", "Student", "Cls", "Subject", "Pgs", "Status", "Issues", "Date", ""]
+        _col_widths = [0.3, 1.1, 0.4, 0.9, 0.35, 0.9, 1.4, 0.65, 0.45]
         _hdr_cols = st.columns(_col_widths)
         for _ci, _ch in enumerate(_tbl_cols):
             _hdr_cols[_ci].markdown(
@@ -1703,9 +1787,9 @@ div[data-testid="stButton"]:has(button[key="toggle_page_preview"]) button {{
             "Accepted w/ Issues":("<span style='background:#FBBF24;color:#000;font-size:0.6rem;font-weight:700;"
                                   "padding:2px 7px;border-radius:10px;white-space:nowrap;'>⚠ Issues</span>"),
             "Rejected (VS)":     ("<span style='background:#F43F5E;color:#fff;font-size:0.6rem;font-weight:700;"
-                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>✕ Rej VS</span>"),
-            "Rejected (Bodhan)": ("<span style='background:#FB923C;color:#fff;font-size:0.6rem;font-weight:700;"
-                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>✕ Rej Bo</span>"),
+                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>✕ Rejected</span>"),
+            "Rejected (Bodhan)": ("<span style='background:#F43F5E;color:#fff;font-size:0.6rem;font-weight:700;"
+                                  "padding:2px 7px;border-radius:10px;white-space:nowrap;'>✕ Rejected</span>"),
             "Pending":           ("<span style='background:#6B7280;color:#fff;font-size:0.6rem;font-weight:700;"
                                   "padding:2px 7px;border-radius:10px;white-space:nowrap;'>… Pending</span>"),
         }
@@ -1718,19 +1802,23 @@ div[data-testid="stButton"]:has(button[key="toggle_page_preview"]) button {{
             _qs  = str(_r.get("quality_status", "Pending"))
             _badge_html = _STATUS_BADGE.get(_qs, _STATUS_BADGE["Pending"])
 
-            _fp_vs  = _r.get("flagged_pages_vs")  or []
-            _fp_bo  = _r.get("flagged_pages_bodhan") or []
-            _fp_all = sorted(set([int(p) for p in (_fp_vs + _fp_bo) if isinstance(p, (int, float))]))
-            if _fp_all:
-                _pg_chips = " ".join(
-                    f"<span style='background:rgba(251,191,36,0.18);color:#FBBF24;font-size:0.58rem;"
-                    f"padding:1px 5px;border-radius:6px;border:1px solid rgba(251,191,36,0.35);'>p.{p}</span>"
-                    for p in _fp_all[:8]
+            # Build issue count chips for this row
+            _row_pg_map = _r.get("page_issues_map_vs") or {}
+            _row_issue_counts: dict[str, int] = {}
+            for _piss in _row_pg_map.values():
+                for _iss in _piss:
+                    _row_issue_counts[_iss] = _row_issue_counts.get(_iss, 0) + 1
+            if _row_issue_counts:
+                _issue_chips_tbl = " ".join(
+                    f"<span style='background:{_issue_color(k)}22;color:{_issue_color(k)};"
+                    f"font-size:0.58rem;font-weight:700;padding:1px 6px;border-radius:6px;"
+                    f"border:1px solid {_issue_color(k)}55;white-space:nowrap;'>"
+                    f"{k.replace('reject_','').replace('_',' ').title()} "
+                    f"<b style='background:{_issue_color(k)};color:#000;border-radius:4px;padding:0 4px;'>{v}</b></span>"
+                    for k, v in sorted(_row_issue_counts.items(), key=lambda x: -x[1])
                 )
-                if len(_fp_all) > 8:
-                    _pg_chips += f"<span style='font-size:0.58rem;color:{_text2};'> +{len(_fp_all)-8}</span>"
             else:
-                _pg_chips = f"<span style='color:{_text2};font-size:0.65rem;'>—</span>"
+                _issue_chips_tbl = f"<span style='color:{_text2};font-size:0.65rem;'>—</span>"
 
             _rc[0].markdown(f"<div style='font-size:0.75rem;color:{_text2};padding:7px 0;'>{_abs_i+1}</div>", unsafe_allow_html=True)
             _rc[1].markdown(f"<div style='font-size:0.72rem;color:{_text3};font-weight:600;padding:7px 0;font-family:monospace;'>{str(_r['student_id'])}</div>", unsafe_allow_html=True)
@@ -1738,11 +1826,18 @@ div[data-testid="stButton"]:has(button[key="toggle_page_preview"]) button {{
             _rc[3].markdown(f"<div style='font-size:0.75rem;color:{_text3};padding:7px 0;'>{str(_r['subject']).title()}</div>", unsafe_allow_html=True)
             _rc[4].markdown(f"<div style='font-size:0.75rem;color:{_text3};padding:7px 0;'>{int(_r['num_pages'])}</div>", unsafe_allow_html=True)
             _rc[5].markdown(f"<div style='padding:5px 0;'>{_badge_html}</div>", unsafe_allow_html=True)
-            _rc[6].markdown(f"<div style='padding:5px 0;line-height:1.6;'>{_pg_chips}</div>", unsafe_allow_html=True)
+            _rc[6].markdown(f"<div style='padding:5px 0;line-height:1.8;'>{_issue_chips_tbl}</div>", unsafe_allow_html=True)
             _rc[7].markdown(f"<div style='font-size:0.75rem;color:{_text2};padding:7px 0;'>{_dt}</div>", unsafe_allow_html=True)
             if _rc[8].button("View", key=f"sc_view_{_abs_i}", use_container_width=True):
-                st.session_state["sc_view_idx"] = _abs_i
-                st.session_state["sc_jump_page"] = None
+                st.session_state["sc_view_idx"]       = _abs_i
+                st.session_state["sc_jump_page"]       = None
+                st.session_state["sc_popup_pdf_url"]   = None
+                st.session_state["sc_popup_ext"]       = None
+                st.session_state["sc_popup_show_page"] = None
+                st.session_state["dlg_show_page"]      = None
+                st.session_state["dlg_show_full_pdf"]  = False
+                render_all_flagged_pages.clear()
+                render_pdf_page_as_png.clear()
                 st.rerun()
             st.markdown(f"<div style='height:1px;background:{_border2};'></div>", unsafe_allow_html=True)
 
@@ -1798,6 +1893,15 @@ avg_subjects_student = round(total_records / n_students, 1) if n_students else 0
 _hero_pct = round(total_pages / _PHASE1_TOTAL_PAGES_FULL * 100, 1)
 _hero_clr = "#10B981" if _hero_pct >= 100 else "#F59E0B" if _hero_pct >= 60 else "#F43F5E"
 _dl_clr   = "#F43F5E" if _days_left <= 14 else "#F59E0B" if _days_left <= 30 else "#10B981"
+# page counts per quality bucket — for the main progress bar
+_accepted_pages = int(_qa_counts["approved"] * total_pages / max(_qa_counts["reviewed"], 1)) if _qa_counts["reviewed"] else 0
+# use actual page sums from filtered where annotation data is joined
+_accepted_pages = int(filtered[filtered["quality_status"].isin(["Clean", "Accepted w/ Issues"])]["num_pages"].sum())
+_rejected_pages = int(filtered[filtered["quality_status"].isin(["Rejected (VS)", "Rejected (Bodhan)"])]["num_pages"].sum())
+_pending_pages  = total_pages - _accepted_pages - _rejected_pages
+_acc_pct  = round(_accepted_pages / _PHASE1_TOTAL_PAGES_FULL * 100, 1)
+_rej_pct  = round(_rejected_pages / _PHASE1_TOTAL_PAGES_FULL * 100, 1)
+_pend_pct = round(_pending_pages  / _PHASE1_TOTAL_PAGES_FULL * 100, 1)
 n_languages = filtered[~filtered["regional_language"].isin(["Unknown", ""])]["regional_language"].nunique()
 
 # ── Homepage ──────────────────────────────────────────────────────────────────
@@ -1827,7 +1931,6 @@ if not st.session_state.get("show_summary"):
 """, unsafe_allow_html=True)
 
     # Progress bar
-    _bar_filled = min(_hero_pct, 100)
     _deadline_str = pd.Timestamp("2026-07-05", tz="Asia/Kolkata").strftime("%d %b %Y")
     st.markdown(f"""
 <div style='margin-bottom:28px;'>
@@ -1840,10 +1943,24 @@ if not st.session_state.get("show_summary"):
       Phase 1 Deadline: {_deadline_str} &nbsp;·&nbsp; {_days_left}d left
     </span>
   </div>
-  <div style='background:rgba(255,255,255,0.08);border-radius:8px;height:14px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);'>
-    <div style='width:{_bar_filled:.1f}%;background:linear-gradient(90deg,{_hero_clr}cc,{_hero_clr});
-                height:100%;border-radius:8px;box-shadow:0 0 12px {_hero_clr}55;
-                transition:width 0.4s ease;'></div>
+  <div style='background:rgba(255,255,255,0.08);border-radius:8px;height:14px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);display:flex;'>
+    <div style='width:{_acc_pct:.1f}%;background:linear-gradient(90deg,#10B98199,#10B981);height:100%;
+                box-shadow:0 0 10px #10B98155;transition:width 0.4s ease;flex-shrink:0;'></div>
+    <div style='width:{_rej_pct:.1f}%;background:linear-gradient(90deg,#F43F5E99,#F43F5E);height:100%;
+                box-shadow:0 0 10px #F43F5E55;transition:width 0.4s ease;flex-shrink:0;'></div>
+    <div style='width:{_pend_pct:.1f}%;background:linear-gradient(90deg,#F59E0B99,#F59E0B);height:100%;
+                box-shadow:0 0 10px #F59E0B55;transition:width 0.4s ease;flex-shrink:0;'></div>
+  </div>
+  <div style='display:flex;gap:16px;margin-top:6px;flex-wrap:wrap;'>
+    <span style='font-size:0.7rem;font-weight:600;color:#10B981;'>
+      ● Accepted &nbsp;{_accepted_pages:,} <span style='color:{_text4};font-weight:400;'>({_acc_pct}%)</span>
+    </span>
+    <span style='font-size:0.7rem;font-weight:600;color:#F43F5E;'>
+      ● Rejected &nbsp;{_rejected_pages:,} <span style='color:{_text4};font-weight:400;'>({_rej_pct}%)</span>
+    </span>
+    <span style='font-size:0.7rem;font-weight:600;color:#F59E0B;'>
+      ● Pending &nbsp;{_pending_pages:,} <span style='color:{_text4};font-weight:400;'>({_pend_pct}%)</span>
+    </span>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1933,20 +2050,26 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
   <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>{n_districts} districts · {n_blocks} blocks</div>
 </div>""", unsafe_allow_html=True)
             if not _state_rows.empty:
-                _fig_states = go.Figure(go.Bar(
-                    x=_state_rows["Pages"],
-                    y=_state_rows["State"],
-                    orientation="h",
-                    marker_color="#818CF8",
-                    text=[f"{int(v):,}" for v in _state_rows["Pages"]],
-                    textposition="outside",
-                    textfont=dict(size=10, color=_chart_text),
-                ))
-                _fig_states.update_layout(**chart_layout(height=160 + len(_state_rows) * 28))
-                _fig_states.update_layout(margin=dict(l=0, r=40, t=4, b=4))
-                _fig_states.update_xaxes(visible=False)
-                _fig_states.update_yaxes(tickfont=dict(size=11))
-                st.plotly_chart(_fig_states, use_container_width=True, config={"displayModeBar": False})
+                if "states_chart_open" not in st.session_state:
+                    st.session_state["states_chart_open"] = False
+                if st.toggle("Show chart", key="states_chart_toggle", value=st.session_state["states_chart_open"]):
+                    st.session_state["states_chart_open"] = True
+                    _state_rows = _state_rows.sort_values("Pages", ascending=False)
+                    _fig_states = go.Figure(go.Bar(
+                        x=_state_rows["State"],
+                        y=_state_rows["Pages"],
+                        marker_color="#818CF8",
+                        text=[f"{int(v):,}" for v in _state_rows["Pages"]],
+                        textposition="outside",
+                        textfont=dict(size=10, color=_chart_text),
+                    ))
+                    _fig_states.update_layout(**chart_layout(height=220))
+                    _fig_states.update_layout(margin=dict(l=4, r=4, t=20, b=4))
+                    _fig_states.update_yaxes(visible=False)
+                    _fig_states.update_xaxes(tickfont=dict(size=10))
+                    st.plotly_chart(_fig_states, use_container_width=True, config={"displayModeBar": False})
+                else:
+                    st.session_state["states_chart_open"] = False
             _avail_states = sorted(_state_rows["State"].tolist())
             if "state_detail_open" not in st.session_state:
                 st.session_state["state_detail_open"] = None
@@ -1964,39 +2087,47 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
                 st.rerun()
 
         # ── Subjects card ──
+        # ── Languages card (top-right) ──
         with _c2:
-            _subj_rows = (
-                filtered.groupby("subject")["num_pages"]
+            _lang_rows = (
+                filtered[~filtered["regional_language"].isin(["Unknown", ""])]
+                .groupby("regional_language")["num_pages"]
                 .sum().sort_values(ascending=True)
                 .reset_index()
-                .rename(columns={"subject": "Subject", "num_pages": "Pages"})
+                .rename(columns={"regional_language": "Language", "num_pages": "Pages"})
             )
             st.markdown(f"""
-<div style='background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.2);
+<div style='background:rgba(192,132,252,0.08);border:1px solid rgba(192,132,252,0.2);
             border-radius:14px;padding:14px 16px 10px;margin-bottom:6px;'>
-  <div style='font-size:0.65rem;font-weight:700;color:#34D399;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Subjects</div>
-  <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{_n_subj_unique}</div>
-  <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>{int(filtered["num_pages"].sum()):,} total pages</div>
+  <div style='font-size:0.65rem;font-weight:700;color:#C084FC;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Languages</div>
+  <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{n_languages}</div>
+  <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>regional languages</div>
 </div>""", unsafe_allow_html=True)
-            if not _subj_rows.empty:
-                _fig_subj = go.Figure(go.Bar(
-                    x=_subj_rows["Pages"],
-                    y=_subj_rows["Subject"].str.title(),
-                    orientation="h",
-                    marker_color="#34D399",
-                    text=[f"{int(v):,}" for v in _subj_rows["Pages"]],
-                    textposition="outside",
-                    textfont=dict(size=10, color=_chart_text),
-                ))
-                _fig_subj.update_layout(**chart_layout(height=160 + len(_subj_rows) * 28))
-                _fig_subj.update_layout(margin=dict(l=0, r=40, t=4, b=4))
-                _fig_subj.update_xaxes(visible=False)
-                _fig_subj.update_yaxes(tickfont=dict(size=11))
-                st.plotly_chart(_fig_subj, use_container_width=True, config={"displayModeBar": False})
-            if "subject_detail_open" not in st.session_state:
-                st.session_state["subject_detail_open"] = False
-            if st.button("📊 Detailed Stats →", key="subj_detail_btn", use_container_width=True):
-                st.session_state["subject_detail_open"] = not st.session_state["subject_detail_open"]
+            if not _lang_rows.empty:
+                if "langs_chart_open" not in st.session_state:
+                    st.session_state["langs_chart_open"] = False
+                if st.toggle("Show chart", key="langs_chart_toggle", value=st.session_state["langs_chart_open"]):
+                    st.session_state["langs_chart_open"] = True
+                    _lang_rows = _lang_rows.sort_values("Pages", ascending=False)
+                    _fig_lang = go.Figure(go.Bar(
+                        x=_lang_rows["Language"].str.title(),
+                        y=_lang_rows["Pages"],
+                        marker_color="#C084FC",
+                        text=[f"{int(v):,}" for v in _lang_rows["Pages"]],
+                        textposition="outside",
+                        textfont=dict(size=10, color=_chart_text),
+                    ))
+                    _fig_lang.update_layout(**chart_layout(height=220))
+                    _fig_lang.update_layout(margin=dict(l=4, r=4, t=20, b=4))
+                    _fig_lang.update_yaxes(visible=False)
+                    _fig_lang.update_xaxes(tickfont=dict(size=10))
+                    st.plotly_chart(_fig_lang, use_container_width=True, config={"displayModeBar": False})
+                else:
+                    st.session_state["langs_chart_open"] = False
+            if "lang_detail_open" not in st.session_state:
+                st.session_state["lang_detail_open"] = False
+            if st.button("📊 Detailed Stats →", key="lang_detail_btn", use_container_width=True):
+                st.session_state["lang_detail_open"] = not st.session_state["lang_detail_open"]
                 st.rerun()
 
         _c3, _c4 = st.columns(2)
@@ -2020,25 +2151,17 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
 </div>""", unsafe_allow_html=True)
             if not _class_page_rows.empty:
                 _fig_cls = go.Figure(go.Bar(
-                    x=_class_page_rows["Pages"],
-                    y=_class_page_rows["Class"],
-                    orientation="h",
+                    x=[f"Cls {c}" for c in _class_page_rows["Class"]],
+                    y=_class_page_rows["Pages"],
                     marker_color="#FBBF24",
                     text=[f"{int(v):,}" for v in _class_page_rows["Pages"]],
                     textposition="outside",
                     textfont=dict(size=10, color=_chart_text),
                 ))
-                _fig_cls.update_layout(**chart_layout(height=160 + len(_class_page_rows) * 28))
-                _fig_cls.update_layout(margin=dict(l=0, r=40, t=4, b=4))
-                _fig_cls.update_xaxes(visible=False)
-                _fig_cls.update_yaxes(
-                    tickmode="array",
-                    tickvals=list(_class_page_rows["Class"]),
-                    ticktext=[str(c) for c in _class_page_rows["Class"]],
-                    tickfont=dict(size=11),
-                    title="Class",
-                    title_font=dict(size=11),
-                )
+                _fig_cls.update_layout(**chart_layout(height=220))
+                _fig_cls.update_layout(margin=dict(l=4, r=4, t=20, b=4))
+                _fig_cls.update_yaxes(visible=False)
+                _fig_cls.update_xaxes(tickfont=dict(size=10))
                 st.plotly_chart(_fig_cls, use_container_width=True, config={"displayModeBar": False})
             if "students_detail_open" not in st.session_state:
                 st.session_state["students_detail_open"] = False
@@ -2046,41 +2169,40 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
                 st.session_state["students_detail_open"] = not st.session_state["students_detail_open"]
                 st.rerun()
 
-        # ── Languages card ──
+        # ── Subjects card (bottom-right) ──
         with _c4:
-            _lang_rows = (
-                filtered[~filtered["regional_language"].isin(["Unknown", ""])]
-                .groupby("regional_language")["num_pages"]
+            _subj_rows = (
+                filtered.groupby("subject")["num_pages"]
                 .sum().sort_values(ascending=True)
                 .reset_index()
-                .rename(columns={"regional_language": "Language", "num_pages": "Pages"})
+                .rename(columns={"subject": "Subject", "num_pages": "Pages"})
             )
             st.markdown(f"""
-<div style='background:rgba(192,132,252,0.08);border:1px solid rgba(192,132,252,0.2);
+<div style='background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.2);
             border-radius:14px;padding:14px 16px 10px;margin-bottom:6px;'>
-  <div style='font-size:0.65rem;font-weight:700;color:#C084FC;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Languages</div>
-  <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{n_languages}</div>
-  <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>regional languages</div>
+  <div style='font-size:0.65rem;font-weight:700;color:#34D399;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>Subjects</div>
+  <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{_n_subj_unique}</div>
+  <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>{int(filtered["num_pages"].sum()):,} total pages</div>
 </div>""", unsafe_allow_html=True)
-            if not _lang_rows.empty:
-                _fig_lang = go.Figure(go.Bar(
-                    x=_lang_rows["Pages"],
-                    y=_lang_rows["Language"].str.title(),
-                    orientation="h",
-                    marker_color="#C084FC",
-                    text=[f"{int(v):,}" for v in _lang_rows["Pages"]],
+            if not _subj_rows.empty:
+                _subj_rows = _subj_rows.sort_values("Pages", ascending=False)
+                _fig_subj = go.Figure(go.Bar(
+                    x=_subj_rows["Subject"].str.title(),
+                    y=_subj_rows["Pages"],
+                    marker_color="#34D399",
+                    text=[f"{int(v):,}" for v in _subj_rows["Pages"]],
                     textposition="outside",
                     textfont=dict(size=10, color=_chart_text),
                 ))
-                _fig_lang.update_layout(**chart_layout(height=160 + len(_lang_rows) * 28))
-                _fig_lang.update_layout(margin=dict(l=0, r=40, t=4, b=4))
-                _fig_lang.update_xaxes(visible=False)
-                _fig_lang.update_yaxes(tickfont=dict(size=11))
-                st.plotly_chart(_fig_lang, use_container_width=True, config={"displayModeBar": False})
-            if "lang_detail_open" not in st.session_state:
-                st.session_state["lang_detail_open"] = False
-            if st.button("📊 Detailed Stats →", key="lang_detail_btn", use_container_width=True):
-                st.session_state["lang_detail_open"] = not st.session_state["lang_detail_open"]
+                _fig_subj.update_layout(**chart_layout(height=220))
+                _fig_subj.update_layout(margin=dict(l=4, r=4, t=20, b=4))
+                _fig_subj.update_yaxes(visible=False)
+                _fig_subj.update_xaxes(tickfont=dict(size=10))
+                st.plotly_chart(_fig_subj, use_container_width=True, config={"displayModeBar": False})
+            if "subject_detail_open" not in st.session_state:
+                st.session_state["subject_detail_open"] = False
+            if st.button("📊 Detailed Stats →", key="subj_detail_btn", use_container_width=True):
+                st.session_state["subject_detail_open"] = not st.session_state["subject_detail_open"]
                 st.rerun()
 
     with _col_sep:
@@ -2099,183 +2221,98 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
   Quality Analysis
 </div>""", unsafe_allow_html=True)
 
-        # ── Aggregate quality stats from the filtered dataset ──────────────
-        _q_total    = len(filtered)
-        _q_rejected = (filtered["quality_status"].isin(["Rejected (VS)", "Rejected (Bodhan)"])).sum()
-        _q_issues   = (filtered["quality_status"] == "Accepted w/ Issues").sum()
-        _q_clean    = (filtered["quality_status"] == "Clean").sum()
-        _q_pending  = (filtered["quality_status"] == "Pending").sum()
-        _q_rej_vs   = (filtered["quality_status"] == "Rejected (VS)").sum()
-        _q_rej_bo   = (filtered["quality_status"] == "Rejected (Bodhan)").sum()
-        _q_accepted = _q_clean + _q_issues  # Total accepted (clean + with issues)
-        _q_rej_pct  = round(_q_rejected / _q_total * 100, 1) if _q_total else 0
-        _q_issue_pct= round(_q_issues  / _q_total * 100, 1) if _q_total else 0
-        _q_accept_pct= round(_q_accepted / _q_total * 100, 1) if _q_total else 0
+        # ── QA stats from annotation DB + approved_uploads.csv ────────────
+        _q_total    = _qa_counts["total"]
+        _q_reviewed = _qa_counts["reviewed"]
+        _q_clean    = _qa_counts["clean"]
+        _q_issues   = _qa_counts["with_issues"]
+        _q_accepted = _qa_counts["approved"]       # clean + w/issues
+        _q_rejected = _qa_counts["rejected"]
+        _q_rej_vs   = _qa_counts["rejected_vs"]
+        _q_rej_bo   = _qa_counts["rejected_bodhan"]
+        _q_pending  = _qa_counts["pending"]        # total − reviewed
+        _done_today = _qa_counts["done_today"]
+        # percentages vs total uploads
+        _q_accept_pct  = round(_q_accepted / _q_total * 100, 1) if _q_total else 0
+        _q_rej_pct     = round(_q_rejected / _q_total * 100, 1) if _q_total else 0
+        _q_issue_pct   = round(_q_issues   / _q_total * 100, 1) if _q_total else 0
+        _q_pending_pct  = round(_q_pending  / _q_total * 100, 1) if _q_total else 0
+        _q_reviewed_pct = round(_q_reviewed / _q_total * 100, 1) if _q_total else 0
+        # percentages vs reviewed (for breakdown bars)
+        _q_accept_of_reviewed_pct = round(_q_accepted / _q_reviewed * 100, 1) if _q_reviewed else 0
+        _q_reject_of_reviewed_pct = round(_q_rejected / _q_reviewed * 100, 1) if _q_reviewed else 0
+        # page-level counts from filtered (for pages context)
+        _q_total_pages    = int(filtered["num_pages"].sum())
+        _q_approved_pages = int(filtered[filtered["quality_status"].isin(["Clean", "Accepted w/ Issues"])]["num_pages"].sum())
+        _q_rejected_pages = int(filtered[filtered["quality_status"].isin(["Rejected (VS)", "Rejected (Bodhan)"])]["num_pages"].sum())
+        _q_clean_pages    = int(filtered[filtered["quality_status"] == "Clean"]["num_pages"].sum())
+        _q_issues_pages   = int(filtered[filtered["quality_status"] == "Accepted w/ Issues"]["num_pages"].sum())
+        _q_reviewed_pages = _q_approved_pages + _q_rejected_pages
+        _q_pending_pages  = _q_total_pages - _q_reviewed_pages
+        _q_done_today_pages = int(filtered[filtered.get("reviewed_date", pd.Series(dtype="object")) == pd.Timestamp.today().date()]["num_pages"].sum()) if "reviewed_date" in filtered.columns else 0
 
-        # Raw upload counts (full set, unfiltered — from uploads_export.csv)
-        _raw_total        = _raw_counts["total"]
-        _raw_approved     = _raw_counts["approved"]
-        _raw_pending_rev  = _raw_counts["pending_review"]
-        _raw_approve_pct  = round(_raw_approved / _raw_total * 100, 1) if _raw_total else 0
-        _raw_pending_pct  = round(_raw_pending_rev / _raw_total * 100, 1) if _raw_total else 0
-
-        # ── Row 0: Full upload pipeline banner ────────────────────────────
+        # ── Upload summary: Total PDFs + accepted/rejected in pages ──────
+        _complete_pct    = round(_q_reviewed / _q_total * 100, 1) if _q_total else 0
+        _q_reviewed_pct  = round(_q_reviewed / _q_total * 100, 1) if _q_total else 0
+        _q_pending_pct   = round(_q_pending  / _q_total * 100, 1) if _q_total else 0
         st.markdown(f"""
 <div style='background:{_bg3};border:1px solid {_border_card};border-radius:12px;
-            padding:12px 16px;margin-bottom:10px;
-            display:flex;align-items:center;gap:0;flex-wrap:wrap;'>
-  <div style='flex:1;min-width:120px;text-align:center;padding:4px 12px;'>
-    <div style='font-size:0.58rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>Total Uploads</div>
-    <div style='font-size:1.5rem;font-weight:900;color:{_text};line-height:1;'>{_raw_total:,}</div>
-    <div style='font-size:0.62rem;color:{_text2};margin-top:2px;'>all submitted</div>
-  </div>
-  <div style='width:1px;background:{_border_card};align-self:stretch;margin:4px 0;'></div>
-  <div style='flex:1;min-width:120px;text-align:center;padding:4px 12px;'>
-    <div style='font-size:0.58rem;font-weight:700;color:#34D399;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>✓ Approved</div>
-    <div style='font-size:1.5rem;font-weight:900;color:#34D399;line-height:1;'>{_raw_approved:,}</div>
-    <div style='font-size:0.62rem;color:{_text2};margin-top:2px;'>{_raw_approve_pct}% of total</div>
-  </div>
-  <div style='width:1px;background:{_border_card};align-self:stretch;margin:4px 0;'></div>
-  <div style='flex:1;min-width:120px;text-align:center;padding:4px 12px;'>
-    <div style='font-size:0.58rem;font-weight:700;color:#FBBF24;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>⏳ Pending Review</div>
-    <div style='font-size:1.5rem;font-weight:900;color:#FBBF24;line-height:1;'>{_raw_pending_rev:,}</div>
-    <div style='font-size:0.62rem;color:{_text2};margin-top:2px;'>{_raw_pending_pct}% awaiting</div>
-  </div>
-  <div style='width:100%;margin-top:10px;'>
-    <div style='background:rgba(255,255,255,0.06);border-radius:6px;height:8px;overflow:hidden;display:flex;'>
-      <div style='width:{_raw_approve_pct}%;background:#34D399;height:100%;'></div>
-      <div style='width:{_raw_pending_pct}%;background:#FBBF24;height:100%;'></div>
+            padding:12px 16px;margin-bottom:12px;'>
+  <div style='display:flex;align-items:center;gap:0;flex-wrap:wrap;'>
+    <div style='flex:1;min-width:90px;text-align:center;padding:4px 10px;'>
+      <div style='font-size:0.55rem;font-weight:700;color:{_text2};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>Total Pages</div>
+      <div style='font-size:1.5rem;font-weight:900;color:{_text};line-height:1;'>{_q_total_pages:,}</div>
+      <div style='font-size:0.55rem;color:{_text4};margin-top:2px;'>{_q_total:,} uploads</div>
+    </div>
+    <div style='width:1px;background:{_border_card};align-self:stretch;margin:4px 0;'></div>
+    <div style='flex:1;min-width:90px;text-align:center;padding:4px 10px;'>
+      <div style='font-size:0.55rem;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>Completed</div>
+      <div style='font-size:1.5rem;font-weight:900;color:#818CF8;line-height:1;'>{_q_reviewed_pages:,}</div>
+      <div style='font-size:0.55rem;color:{_text4};margin-top:2px;'>{_q_reviewed:,} uploads</div>
+    </div>
+    <div style='width:1px;background:{_border_card};align-self:stretch;margin:4px 0;'></div>
+    <div style='flex:1;min-width:90px;text-align:center;padding:4px 10px;'>
+      <div style='font-size:0.55rem;font-weight:700;color:#FBBF24;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>⏳ Pending</div>
+      <div style='font-size:1.5rem;font-weight:900;color:#FBBF24;line-height:1;'>{_q_pending_pages:,}</div>
+      <div style='font-size:0.55rem;color:{_text4};margin-top:2px;'>{_q_pending:,} uploads</div>
     </div>
   </div>
 </div>""", unsafe_allow_html=True)
 
-        # ── Row 1: Enhanced KPI tiles with Accept/Reject showcase ──────────
-        _qa1, _qa2, _qa3, _qa4 = st.columns(4)
-        def _qa_tile(col, label, value, sub, color, icon=""):
-            col.markdown(f"""
-<div style='background:rgba(255,255,255,0.03);border:1px solid {color}33;
-            border-radius:12px;padding:12px 10px 10px;text-align:center;
-            transition:all 0.2s ease;'>
-  <div style='font-size:0.6rem;font-weight:700;color:{color};text-transform:uppercase;
-              letter-spacing:0.08em;margin-bottom:4px;'>{icon} {label}</div>
-  <div style='font-size:1.55rem;font-weight:900;color:{_text};line-height:1;'>{value}</div>
-  <div style='font-size:0.65rem;color:{_text2};margin-top:3px;'>{sub}</div>
-</div>""", unsafe_allow_html=True)
-
-        _qa_tile(_qa1, "Total Reviewed", f"{_q_clean + _q_issues + _q_rejected:,}",
-                 f"{round((_q_clean+_q_issues+_q_rejected)/_q_total*100,1) if _q_total else 0}% of {_q_total:,} approved", "#818CF8", "📊")
-        _qa_tile(_qa2, "✓ Accepted",  f"{_q_accepted:,}",
-                 f"{_q_accept_pct}% approved", "#34D399", "")
-        _qa_tile(_qa3, "⚠ With Issues",     f"{_q_issues:,}",
-                 f"{_q_issue_pct}% flagged", "#FBBF24", "")
-        _qa_tile(_qa4, "✗ Rejected",    f"{_q_rejected:,}",
-                 f"{_q_rej_pct}% reject rate", "#F43F5E", "")
-
-        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-        # ── Row 2: Accepted vs Rejected Comparison + Status Donut ─────────
-        _qb1, _qb2 = st.columns([1.3, 1])
-        with _qb1:
-            # Calculate reviewed count (excluding pending)
-            _q_reviewed = _q_accepted + _q_rejected
-            _q_accept_of_reviewed_pct = round(_q_accepted / _q_reviewed * 100, 1) if _q_reviewed > 0 else 0
-            _q_reject_of_reviewed_pct = round(_q_rejected / _q_reviewed * 100, 1) if _q_reviewed > 0 else 0
-
-            # Review Decision Breakdown card — redesigned bars
-            st.markdown(f"""
-<div style='background:{_bg3};border:1px solid {_border_card};
-            border-radius:12px;padding:16px 18px;height:100%;box-sizing:border-box;'>
+        # ── Single wide "Total Reviewed" bar  X = Y + Z + A ───────────────
+        _clean_w   = round(_q_clean   / _q_reviewed * 100, 1) if _q_reviewed else 0
+        _issues_w  = round(_q_issues  / _q_reviewed * 100, 1) if _q_reviewed else 0
+        _reject_w  = round(_q_rejected/ _q_reviewed * 100, 1) if _q_reviewed else 0
+        st.markdown(f"""
+<div style='background:{_bg3};border:1px solid {_border_card};border-radius:16px;
+            padding:28px 32px;margin-bottom:12px;'>
   <div style='font-size:0.65rem;font-weight:700;color:{_text2};text-transform:uppercase;
-              letter-spacing:0.08em;margin-bottom:14px;'>Review Decision Breakdown</div>
-
-  <!-- Accepted row -->
-  <div style='margin-bottom:14px;'>
-    <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;'>
-      <span style='font-size:0.75rem;font-weight:600;color:#34D399;'>✓ Accepted</span>
-      <div style='display:flex;align-items:baseline;gap:6px;'>
-        <span style='font-size:1.35rem;font-weight:900;color:#34D399;line-height:1;'>{_q_accepted:,}</span>
-        <span style='font-size:0.7rem;font-weight:600;color:{_text2};'>{_q_accept_of_reviewed_pct}%</span>
-      </div>
+              letter-spacing:0.1em;margin-bottom:14px;'>Total Reviewed Pages</div>
+  <div style='display:flex;align-items:center;gap:12px;flex-wrap:nowrap;'>
+    <div style='text-align:center;flex-shrink:0;'>
+      <div style='font-size:2.6rem;font-weight:900;color:{_text};line-height:1;'>{_q_reviewed_pages:,}</div>
+      <div style='font-size:0.58rem;color:{_text4};margin-top:3px;'>{_q_reviewed:,} uploads</div>
     </div>
-    <div style='background:rgba(52,211,153,0.12);border-radius:8px;height:32px;overflow:hidden;
-                border:1px solid rgba(52,211,153,0.2);position:relative;'>
-      <div style='width:{min(_q_accept_of_reviewed_pct, 100)}%;background:linear-gradient(90deg,#34D399,#6EE7B7);
-                  height:100%;border-radius:8px;transition:width 0.6s ease;'></div>
-      {"" if _q_accept_of_reviewed_pct == 0 else f"<span style='position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:0.72rem;font-weight:700;color:{'#000' if _q_accept_of_reviewed_pct > 15 else '#34D399'};'>{_q_accept_of_reviewed_pct}%</span>"}
+    <span style='font-size:1.6rem;color:{_text2};font-weight:300;flex-shrink:0;'>=</span>
+    <div style='text-align:center;flex-shrink:0;'>
+      <div style='font-size:0.82rem;font-weight:700;color:#34D399;margin-bottom:5px;letter-spacing:0.02em;'>Accepted w/o Issues</div>
+      <div style='font-size:2.4rem;font-weight:900;color:#34D399;line-height:1;'>{_q_clean_pages:,}</div>
+      <div style='font-size:0.72rem;color:{_text4};margin-top:4px;font-weight:500;'>{_q_clean:,} uploads</div>
     </div>
-  </div>
-
-  <!-- Rejected row -->
-  <div style='margin-bottom:14px;'>
-    <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;'>
-      <span style='font-size:0.75rem;font-weight:600;color:#F43F5E;'>✗ Rejected</span>
-      <div style='display:flex;align-items:baseline;gap:6px;'>
-        <span style='font-size:1.35rem;font-weight:900;color:#F43F5E;line-height:1;'>{_q_rejected:,}</span>
-        <span style='font-size:0.7rem;font-weight:600;color:{_text2};'>{_q_reject_of_reviewed_pct}%</span>
-      </div>
+    <span style='font-size:1.6rem;color:{_text2};font-weight:300;flex-shrink:0;'>+</span>
+    <div style='text-align:center;flex-shrink:0;'>
+      <div style='font-size:0.82rem;font-weight:700;color:#FBBF24;margin-bottom:5px;letter-spacing:0.02em;'>Accepted w/ Issues</div>
+      <div style='font-size:2.4rem;font-weight:900;color:#FBBF24;line-height:1;'>{_q_issues_pages:,}</div>
+      <div style='font-size:0.72rem;color:{_text4};margin-top:4px;font-weight:500;'>{_q_issues:,} uploads</div>
     </div>
-    <div style='background:rgba(244,63,94,0.12);border-radius:8px;height:32px;overflow:hidden;
-                border:1px solid rgba(244,63,94,0.2);position:relative;'>
-      <div style='width:{min(_q_reject_of_reviewed_pct, 100)}%;background:linear-gradient(90deg,#F43F5E,#FB7185);
-                  height:100%;border-radius:8px;transition:width 0.6s ease;'></div>
-      {"" if _q_reject_of_reviewed_pct == 0 else f"<span style='position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:0.72rem;font-weight:700;color:{'#fff' if _q_reject_of_reviewed_pct > 15 else '#F43F5E'};'>{_q_reject_of_reviewed_pct}%</span>"}
+    <span style='font-size:1.6rem;color:{_text2};font-weight:300;flex-shrink:0;'>+</span>
+    <div style='text-align:center;flex-shrink:0;'>
+      <div style='font-size:0.82rem;font-weight:700;color:#F43F5E;margin-bottom:5px;letter-spacing:0.02em;'>Rejected</div>
+      <div style='font-size:2.4rem;font-weight:900;color:#F43F5E;line-height:1;'>{_q_rejected_pages:,}</div>
+      <div style='font-size:0.72rem;color:{_text4};margin-top:4px;font-weight:500;'>{_q_rejected:,} uploads</div>
     </div>
   </div>
-
-  <!-- With Issues row -->
-  <div style='margin-bottom:{"12px" if _q_rejected > 0 else "0"};'>
-    <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;'>
-      <span style='font-size:0.75rem;font-weight:600;color:#FBBF24;'>⚠ With Issues</span>
-      <div style='display:flex;align-items:baseline;gap:6px;'>
-        <span style='font-size:1.35rem;font-weight:900;color:#FBBF24;line-height:1;'>{_q_issues:,}</span>
-        <span style='font-size:0.7rem;font-weight:600;color:{_text2};'>{_q_issue_pct}%</span>
-      </div>
-    </div>
-    <div style='background:rgba(251,191,36,0.12);border-radius:8px;height:32px;overflow:hidden;
-                border:1px solid rgba(251,191,36,0.2);position:relative;'>
-      <div style='width:{min(_q_issue_pct, 100)}%;background:linear-gradient(90deg,#FBBF24,#FCD34D);
-                  height:100%;border-radius:8px;transition:width 0.6s ease;'></div>
-      {"" if _q_issue_pct == 0 else f"<span style='position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:0.72rem;font-weight:700;color:{'#000' if _q_issue_pct > 15 else '#FBBF24'};'>{_q_issue_pct}%</span>"}
-    </div>
-  </div>
-
-  {f'''<div style='padding-top:10px;border-top:1px solid {_border};display:flex;gap:16px;'>
-    <div>
-      <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:0.07em;margin-bottom:2px;'>VS Stage</div>
-      <span style='font-size:0.9rem;font-weight:800;color:#F43F5E;'>{_q_rej_vs:,}</span>
-    </div>
-    <div>
-      <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:0.07em;margin-bottom:2px;'>Bodhan</div>
-      <span style='font-size:0.9rem;font-weight:800;color:#FB923C;'>{_q_rej_bo:,}</span>
-    </div>
-  </div>''' if _q_rejected > 0 else ''}
 </div>""", unsafe_allow_html=True)
-
-        with _qb2:
-            # Status donut
-            _donut_labels = ["Clean", "Flagged", "Rej VS", "Rej Bodhan", "Pending"]
-            _donut_vals   = [_q_clean, _q_issues, _q_rej_vs, _q_rej_bo, _q_pending]
-            _donut_colors = ["#34D399", "#FBBF24", "#F43F5E", "#FB923C", "#6B7280"]
-            _fig_donut = go.Figure(go.Pie(
-                labels=_donut_labels, values=_donut_vals,
-                hole=0.62,
-                marker=dict(colors=_donut_colors, line=dict(width=0)),
-                textinfo="none",
-                hovertemplate="%{label}: %{value} (%{percent})<extra></extra>",
-            ))
-            _donut_layout = chart_layout(height=130)
-            _donut_layout["margin"] = dict(l=0, r=0, t=0, b=0)
-            _fig_donut.update_layout(
-                **_donut_layout,
-                showlegend=False,
-                annotations=[dict(
-                    text=f"<b>{_q_total:,}</b><br><span style='font-size:9px'>total</span>",
-                    x=0.5, y=0.5, showarrow=False,
-                    font=dict(size=13, color=_text),
-                    xanchor="center",
-                )],
-            )
-            st.plotly_chart(_fig_donut, use_container_width=True, config={"displayModeBar": False})
 
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
@@ -2296,25 +2333,29 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
         }
         _issue_source = Counter(_all_issues) if _all_issues else _DEMO_ISSUES
         _issue_df = (
-            pd.DataFrame(_issue_source.items(), columns=["Issue", "Count"])
-            .sort_values("Count", ascending=True)
+            pd.DataFrame(_issue_source.items(), columns=["IssueKey", "Count"])
+            .sort_values("Count", ascending=False)
         )
-        _issue_df["Issue"] = _issue_df["Issue"].str.replace("_", " ").str.title()
         _is_demo_issues = not bool(_all_issues)
+        _issue_df["Issue"] = _issue_df["IssueKey"].str.replace("_", " ").str.title()
+        _issue_bar_colors = (
+            [_issue_color(k) for k in _issue_df["IssueKey"]]
+            if not _is_demo_issues
+            else ["rgba(251,191,36,0.3)"] * len(_issue_df)
+        )
         _fig_issues = go.Figure(go.Bar(
-            x=_issue_df["Count"],
-            y=_issue_df["Issue"],
-            orientation="h",
-            marker_color="#FBBF24" if not _is_demo_issues else "rgba(251,191,36,0.3)",
+            x=_issue_df["Issue"],
+            y=_issue_df["Count"],
+            marker_color=_issue_bar_colors,
             text=[str(v) for v in _issue_df["Count"]],
             textposition="outside",
             textfont=dict(size=10, color=_chart_text),
         ))
-        _issues_layout = chart_layout(height=100 + len(_issue_df) * 26)
-        _issues_layout["margin"] = dict(l=0, r=36, t=0, b=0)
+        _issues_layout = chart_layout(height=220)
+        _issues_layout["margin"] = dict(l=4, r=4, t=20, b=4)
         _fig_issues.update_layout(**_issues_layout)
-        _fig_issues.update_xaxes(visible=False)
-        _fig_issues.update_yaxes(tickfont=dict(size=11))
+        _fig_issues.update_yaxes(visible=False)
+        _fig_issues.update_xaxes(tickfont=dict(size=10))
         if _is_demo_issues:
             st.markdown(f"""
 <div style='display:flex;align-items:center;gap:6px;margin-bottom:4px;'>
