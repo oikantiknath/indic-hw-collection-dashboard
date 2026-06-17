@@ -745,14 +745,14 @@ def load_annotation_data() -> pd.DataFrame:
     """
     if not _ANNOTATION_DB.exists():
         return pd.DataFrame(columns=["unique_file_id", "reject_stage", "review_flag",
-                                     "issues_vs", "flagged_pages_vs"])
+                                     "issues_vs", "flagged_pages_vs", "corrections_ok"])
     conn = sqlite3.connect(str(_ANNOTATION_DB))
     rows_out = []
     try:
         cur = conn.execute(
-            "SELECT unique_file_id, pdf_decision, page_rejections FROM pdf_annotations"
+            "SELECT unique_file_id, pdf_decision, page_rejections, corrections_ok FROM pdf_annotations"
         )
-        for uid, decision, page_rej_raw in cur.fetchall():
+        for uid, decision, page_rej_raw, corrections_ok in cur.fetchall():
             decision = (decision or "").strip().lower()
 
             if decision == "rejected":
@@ -789,6 +789,7 @@ def load_annotation_data() -> pd.DataFrame:
                 "issues_vs":         issues_vs,
                 "flagged_pages_vs":  flagged_pages_vs,
                 "page_issues_map_vs": page_issues_map_vs,
+                "corrections_ok":    (corrections_ok or "").strip().lower(),
             })
     finally:
         conn.close()
@@ -1092,9 +1093,9 @@ for _col in ("handwritten_or_handdrawn", "printed", "mixed_content", "rotation")
     if _col not in df.columns:
         df[_col] = ""
 
-for _col in ("reject_stage", "review_flag"):
+for _col in ("reject_stage", "review_flag", "corrections_ok"):
     if _col not in df.columns:
-        df[_col] = "null" if _col == "reject_stage" else "pending"
+        df[_col] = "null" if _col == "reject_stage" else ("pending" if _col == "review_flag" else "")
 for _col in ("issues_vs", "issues_bodhan", "flagged_pages_vs", "flagged_pages_bodhan"):
     if _col not in df.columns:
         df[_col] = [[] for _ in range(len(df))]
@@ -1114,6 +1115,7 @@ if not _ann.empty and "unique_file_id" in df.columns:
             df.at[_idx, "issues_vs"]           = _row["issues_vs"]
             df.at[_idx, "flagged_pages_vs"]    = _row["flagged_pages_vs"]
             df.at[_idx, "page_issues_map_vs"]  = _row.get("page_issues_map_vs", {})
+            df.at[_idx, "corrections_ok"]      = _row.get("corrections_ok", "")
 
 for _col in ("place", "generate_metadata", "data_bucket"):
     if _col not in df.columns:
@@ -1697,6 +1699,32 @@ if st.session_state["show_sample_checker"]:
         _sc_df = _sc_df[_sc_df["quality_status"] == _sel_sc_quality]
     elif _sel_sc_quality != "All":
         _sc_df = _sc_df[_sc_df["quality_status"] == _sel_sc_quality]
+
+    _sc_fe, _sc_ff, _sc_fg, _sc_fh = st.columns(4)
+
+    _board_opts_sc = ["All"] + sorted([b for b in _sc_df["board"].unique() if b and b not in ("Other", "")])
+    _sel_sc_board = _sc_fe.selectbox("Board", _board_opts_sc, key="sc_board")
+    if _sel_sc_board != "All":
+        _sc_df = _sc_df[_sc_df["board"] == _sel_sc_board]
+
+    # Issues: show only rows that have at least one flagged issue vs "No Issues"
+    _issues_opts = ["All", "Has Issues", "No Issues"]
+    _sel_sc_issues = _sc_ff.selectbox("Issues", _issues_opts, key="sc_issues")
+    if _sel_sc_issues == "Has Issues":
+        _sc_df = _sc_df[_sc_df["issues_vs"].apply(lambda x: bool(x and len(x) > 0))]
+    elif _sel_sc_issues == "No Issues":
+        _sc_df = _sc_df[_sc_df["issues_vs"].apply(lambda x: not (x and len(x) > 0))]
+
+    _corr_vals = sorted([v for v in _sc_df["corrections_ok"].dropna().unique() if v != ""])
+    _corr_opts = ["All"] + _corr_vals
+    _sel_sc_corr = _sc_fg.selectbox("Corrections OK", _corr_opts, key="sc_corrections_ok")
+    if _sel_sc_corr != "All":
+        _sc_df = _sc_df[_sc_df["corrections_ok"] == _sel_sc_corr]
+
+    _lang_opts_sc = ["All"] + sorted([l for l in _sc_df["regional_language"].unique() if l and l != "Unknown"])
+    _sel_sc_lang = _sc_fh.selectbox("Language", _lang_opts_sc, key="sc_lang")
+    if _sel_sc_lang != "All":
+        _sc_df = _sc_df[_sc_df["regional_language"] == _sel_sc_lang]
 
     n_total = len(_sc_df)
     _SC_PAGE_SIZE = 10
