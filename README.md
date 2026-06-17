@@ -1,32 +1,36 @@
 # Indic Handwriting Collection Dashboard (OCR-VS)
 
-Access the live dashboard here: https://untold-displace-proton.ngrok-free.dev/
-
-This is a Streamlit-based monitoring dashboard specifically designed to track the progress of Indic handwriting data collection across schools, validating against strict compliance targets. 
+A Streamlit-based monitoring dashboard for tracking the progress of Indic handwriting data collection across schools, validating against strict compliance targets.
 
 ## Key Features
 
-*   **Real-time Target Tracking:** Analyzes metrics to ensure the dataset accurately follows predefined distribution requirements (e.g., Phase 1 milestone aiming for 2.5 Crore pages).
-*   **Language-Specific Groupings:** Automatically segments data into language-specific tabs based on district regions (Tamil, Telugu, Hindi, etc.) for targeted compliance scaling.
-*   **Regional Medium Validation:** Strictly validates that the student's reported medium of instruction matches the active region/tab (e.g. `Hindi == Hindi`). Blank (`Not Mentioned`) values are treated as failures to enforce data hygiene.
-*   **Detailed Demographics Breakdown:** Comprehensive breakdowns of collection rates visually grouped by class level, board, and gender.
-*   **Subject Coverage:** Dynamically ensures sufficient distribution across multi-subject criteria.
-*   **Compliance Target Bars:** Consistent segmented HTML bars (School Type, Rural/Urban, Left-handedness, Regional Medium) with dashed target lines and color-coded legends.
-*   **Aspirational Districts:** Tracks the percentage of records from aspirational-district states, shown only when relevant data is present.
-*   **Left-handedness Tracking:** Monitors left-handed participant ratio (target ≥5%) using the same bar format as other demographic metrics.
-*   **Min Students per Class per School:** Validates that school-class combinations meet the minimum student threshold (≥25); only displayed when at least one combo meets the target.
-*   **Sample Checker — PDF Viewer:** A toggleable panel (top-right button) that lets reviewers browse and view individual collected PDFs directly from S3/MinIO storage. Supports filtering by distributor, state, district, block, school, gender, and more, with inline PDF rendering via pre-signed URLs.
+*   **Real-time Target Tracking:** Analyzes metrics to ensure the dataset follows predefined distribution requirements (Phase 1 milestone: 2.5 Crore pages).
+*   **Language-Specific Tabs:** Automatically segments data by district region (Tamil, Telugu, Hindi, etc.) for targeted compliance tracking.
+*   **Regional Medium Validation:** Validates that the student's medium of instruction matches the active region. Blank (`Not Mentioned`) values are treated as failures.
+*   **Demographics Breakdown:** Breakdowns of collection rates by class level, board, and gender.
+*   **Subject Coverage:** Ensures sufficient distribution across multi-subject criteria.
+*   **Compliance Target Bars:** Segmented HTML bars (School Type, Rural/Urban, Left-handedness, Regional Medium) with dashed target lines and color-coded legends.
+*   **Aspirational Districts:** Tracks the percentage of records from aspirational-district states (shown only when relevant data is present).
+*   **Left-handedness Tracking:** Monitors left-handed participant ratio (target ≥5%).
+*   **Min Students per Class per School:** Validates that school-class combinations meet the minimum student threshold (≥25).
+*   **Quality Analysis Panel:** Side-by-side collection vs. quality view per language tab, showing accepted/rejected/pending counts, Top Issue Types bar chart (bars colored per issue type), and deeplink filtering into the Sample Checker.
+*   **Sample Checker — PDF Viewer:** Overlay dialog (`st.dialog`) for browsing and reviewing individual collected PDFs directly from S3/MinIO. Supports filtering by distributor, state, district, block, school, gender, and quality status. Flagged page buttons are color-coded per issue type. All "Rejected (VS)" / "Rejected (Bodhan)" labels are unified to "Rejected".
+*   **Parallel PDF Caching:** All flagged pages for a PDF are pre-cached in parallel via `ThreadPoolExecutor` (8 workers). Pages are rendered as JPEG at 1.5× zoom (~5× faster than PNG).
+*   **Annotation DB Integration:** Review decisions and page-level issues are read from a local SQLite `annotation.db` (via `load_annotation_data` / `load_qa_counts`).
+*   **Dark / Light Theme Toggle:** Fixed toggle button in the top-right corner; defaults to dark mode.
 
 ## Quick Start
 
-1. Install required dependencies:
+1. Install dependencies:
    ```bash
-   pip install streamlit pandas plotly openpyxl
+   pip install streamlit pandas plotly openpyxl boto3 pypdf pymupdf python-dotenv
    ```
 
-2. Place the raw data excel file (`Details of collected data.xlsx`) in the root directory.
+2. Place the raw data Excel file (`Details of collected data.xlsx`) in the root directory.
 
-3. Run the dashboard:
+3. Set up a `.env` file with your MinIO/S3 credentials (see `s3_helpers.py` for required vars).
+
+4. Run the dashboard:
    ```bash
    streamlit run app.py
    ```
@@ -45,8 +49,22 @@ This is a Streamlit-based monitoring dashboard specifically designed to track th
 | Left-handed Participants | ≥ 5% |
 | Min Students per Class per School | ≥ 25 |
 
-## Workflow & Logic Enhancements
+## Project Structure
 
-*   **Accurate Metrics:** The tool reads exact page counts rather than assuming files are equivalent to PDFs.
-*   **Compliance Penalties:** Any collection marked as "Not Mentioned" is recorded as a failure against target goals to ensure field vendors enforce data entry.
-*   **Conditional Display:** Sections like Aspirational Districts and Min Students per Class per School are hidden when no qualifying data exists, keeping the dashboard clean.
+```
+app.py               # Main dashboard application
+chart_helpers.py     # Chart layout, color constants, HTML helpers
+s3_helpers.py        # MinIO/S3 client, presigned URLs, page cache
+mappings.py          # State/language/subject/board normalization maps
+fetch_data.py        # Data fetching utilities
+field_schema.json    # Field schema definitions
+targets.json         # Compliance target configuration
+annotation.db        # Local SQLite DB for review decisions (not committed)
+```
+
+## Workflow & Logic Notes
+
+*   **Accurate Page Counts:** Reads exact page counts from PDFs rather than assuming file count = page count.
+*   **Compliance Penalties:** Any collection marked "Not Mentioned" is recorded as a failure to enforce data hygiene.
+*   **Conditional Display:** Sections like Aspirational Districts and Min Students per Class per School are hidden when no qualifying data exists.
+*   **Caching:** Dashboard data is cached with `@st.cache_data` (30-min TTL for S3 renders, 5-min TTL for annotation DB reads).
