@@ -19,30 +19,27 @@ C_GOVT    = "#34D399"
 C_AIDED   = "#6EE7B7"
 C_PRIVATE = "#F43F5E"
 C_RURAL   = "#34D399"
-C_URBAN   = "#818CF8"
+C_URBAN   = "#2563eb"
 C_LEFT    = "#C084FC"
 C_RIGHT   = "#60A5FA"
-C_INDIGO  = "#818CF8"
-C_VIOLET  = "#A78BFA"
+C_INDIGO  = "#d4500a"
+C_VIOLET  = "#b45309"
 
 COLORS = [
-    "#818CF8", "#34D399", "#FBBF24", "#C084FC", "#60A5FA",
-    "#A78BFA", "#6EE7B7", "#F9A8D4", "#FCD34D", "#7DD3FC",
+    "#d4500a", "#34D399", "#FBBF24", "#C084FC", "#60A5FA",
+    "#b45309", "#6EE7B7", "#F9A8D4", "#FCD34D", "#7DD3FC",
 ]
 
 
 def make_chart_layout(theme: dict):
     """Return a chart_layout(**kwargs) function bound to the given theme dict."""
-    _dark        = theme["dark"]
     _text        = theme["text"]
     _text2       = theme["text2"]
     _bg2         = theme["bg2"]
     _border      = theme["border"]
-    _template    = "plotly_dark" if _dark else "plotly_white"
-    _grid_clr    = "rgba(255,255,255,0.05)" if _dark else "rgba(0,0,0,0.18)"
-    # In light mode use the full dark text colour so tick labels / axis titles
-    # are legible against the white/transparent chart background.
-    _chart_text  = _text2 if _dark else _text
+    _template    = "plotly_white"
+    _grid_clr    = "rgba(0,0,0,0.08)"
+    _chart_text  = _text
     _bar_textfont = dict(color=_text, family="Inter", size=11)
 
     _axis_title_font = dict(color=_chart_text, family="Inter", size=12)
@@ -60,14 +57,14 @@ def make_chart_layout(theme: dict):
             font=dict(family="Inter", size=12, color=_chart_text),
             xaxis=dict(
                 showgrid=False, zeroline=False,
-                showline=not _dark, linecolor=_grid_clr, linewidth=1,
+                showline=True, linecolor=_grid_clr, linewidth=1,
                 color=_chart_text,
                 tickfont=_axis_tick_font,
                 title=dict(font=_axis_title_font),
             ),
             yaxis=dict(
                 showgrid=True, gridcolor=_grid_clr, zeroline=False,
-                showline=not _dark, linecolor=_grid_clr, linewidth=1,
+                showline=True, linecolor=_grid_clr, linewidth=1,
                 color=_chart_text,
                 tickfont=_axis_tick_font,
                 title=dict(font=_axis_title_font),

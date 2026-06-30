@@ -51,83 +51,38 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Theme state (light default) ──────────────────────────────────────────────
-if "dark_mode" not in st.session_state:
-    st.session_state["dark_mode"] = True
-
-_dark = st.session_state["dark_mode"]
-
-# ── Styling ───────────────────────────────────────────────────────────────────
-if _dark:
-    _bg               = "#09090B"
-    _bg2              = "#121217"
-    _bg3              = "#18181F"
-    _bg4              = "#1E1E2E"
-    _border           = "rgba(255,255,255,0.07)"
-    _border2          = "rgba(255,255,255,0.05)"
-    _border_card      = "rgba(255,255,255,0.08)"
-    _text             = "#FFFFFF"
-    _text2            = "#A1A1AA"
-    _text3            = "#E2E8F0"
-    _text4            = "#94A3B8"
-    _input_bg         = "#18181F"
-    _input_border     = "rgba(255,255,255,0.12)"
-    _title_grad       = "linear-gradient(90deg, #FFFFFF 0%, #A1A1AA 100%)"
-    _card_hover_border= "rgba(255,255,255,0.15)"
-    _tab_border       = "rgba(255,255,255,0.05)"
-    _sidebar_bg       = "#121217"
-    _sidebar_hr       = "rgba(255,255,255,0.05)"
-    _jump_bg          = "#121217"
-    _jump_content_bg  = "#18181F"
-    _alert_border     = "rgba(255,255,255,0.05)"
-    _progress_track   = "rgba(255,255,255,0.08)"
-    _toggle_bg        = "#1E1E2E"
-    _toggle_color     = "#FFFFFF"
-    _theme_icon       = "☀️"
-    _btn_bg           = "#1E1E2E"
-    _btn_bg_hover     = "#2A2A3E"
-    _btn_color        = "#E2E8F0"
-    _btn_border       = "rgba(255,255,255,0.12)"
-    _accent           = "#818CF8"
-    _accent_bg        = "rgba(129,140,248,0.1)"
-    _accent_border    = "rgba(129,140,248,0.3)"
-    _error_color      = "#f87171"
-    _shadow           = "rgba(0,0,0,0.35)"
-else:
-    _bg               = "#F4F6FB"
-    _bg2              = "#FFFFFF"
-    _bg3              = "#EEF2F9"
-    _bg4              = "#E8EDF7"
-    _border           = "rgba(99,102,241,0.12)"
-    _border2          = "rgba(99,102,241,0.08)"
-    _border_card      = "rgba(99,102,241,0.14)"
-    _text             = "#0F172A"
-    _text2            = "#475569"
-    _text3            = "#1E293B"
-    _text4            = "#64748B"
-    _input_bg         = "#FFFFFF"
-    _input_border     = "rgba(99,102,241,0.25)"
-    _title_grad       = "linear-gradient(90deg, #4F46E5 0%, #7C3AED 100%)"
-    _card_hover_border= "rgba(99,102,241,0.4)"
-    _tab_border       = "rgba(99,102,241,0.12)"
-    _sidebar_bg       = "#FFFFFF"
-    _sidebar_hr       = "rgba(99,102,241,0.1)"
-    _jump_bg          = "#FFFFFF"
-    _jump_content_bg  = "#F4F6FB"
-    _alert_border     = "rgba(99,102,241,0.12)"
-    _progress_track   = "rgba(99,102,241,0.08)"
-    _toggle_bg        = "#FFFFFF"
-    _toggle_color     = "#4F46E5"
-    _theme_icon       = "🌙"
-    _btn_bg           = "#FFFFFF"
-    _btn_bg_hover     = "#EEF2F9"
-    _btn_color        = "#1E293B"
-    _btn_border       = "rgba(99,102,241,0.25)"
-    _accent           = "#4F46E5"
-    _accent_bg        = "rgba(79,70,229,0.08)"
-    _accent_border    = "rgba(79,70,229,0.3)"
-    _error_color      = "#DC2626"
-    _shadow           = "rgba(99,102,241,0.10)"
+# ── Styling — warm paper palette ─────────────────────────────────────────────
+_dark            = False        # kept for chart_helpers compat
+_bg              = "#f6f4f1"   # warm off-white canvas
+_bg2             = "#ffffff"   # surfaces / cards
+_bg3             = "#fdfcfb"   # slightly raised
+_bg4             = "#f0ebe6"   # hover / striped rows
+_border          = "#e4ddd6"   # hairline borders
+_border2         = "#ede8e3"
+_border_card     = "#e4ddd6"
+_text            = "#1a1714"   # near-black
+_text2           = "#6b5f56"   # warm gray secondary
+_text3           = "#3d3530"   # mid text
+_text4           = "#a8998e"   # muted tertiary
+_input_bg        = "#ffffff"
+_input_border    = "#e4ddd6"
+_card_hover_border = "#c8bfb8"
+_tab_border      = "#e4ddd6"
+_sidebar_bg      = "#ffffff"
+_sidebar_hr      = "#e4ddd6"
+_jump_bg         = "#ffffff"
+_jump_content_bg = "#fdfcfb"
+_alert_border    = "#e4ddd6"
+_progress_track  = "#f0ebe6"
+_btn_bg          = "#ffffff"
+_btn_bg_hover    = "#f6f4f1"
+_btn_color       = "#1a1714"
+_btn_border      = "#e4ddd6"
+_accent          = "#d4500a"   # burnt orange — single accent
+_accent_bg       = "rgba(212,80,10,0.08)"
+_accent_border   = "rgba(212,80,10,0.3)"
+_error_color     = "#c0392b"
+_shadow          = "rgba(0,0,0,0.06)"
 
 st.markdown(f"""
 <style>
@@ -150,17 +105,14 @@ st.markdown(f"""
         --gdg-bg-header-hovered:       {_bg4};
         --gdg-border-color:            {_border};
         --gdg-horizontal-border-color: {_border};
-        --gdg-accent-color:            #6366F1;
-        --gdg-accent-light:            rgba(99,102,241,0.1);
+        --gdg-accent-color:            {_accent};
+        --gdg-accent-light:            {_accent_bg};
     }}
 
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
     .stApp > header {{ display: none !important; }}
     .stApp {{
         background-color: {_bg} !important;
-        background-image:
-            radial-gradient(circle at 15% 50%, rgba(99,102,241,0.06), transparent 40%),
-            radial-gradient(circle at 85% 30%, rgba(16,185,129,0.04), transparent 40%);
     }}
     .main .block-container {{ padding-top: 0rem !important; margin-top: -5.5rem !important; max-width: 1400px; }}
 
@@ -177,10 +129,9 @@ st.markdown(f"""
 
     /* ── Title ── */
     .dashboard-title {{
-        font-size: 4rem; font-weight: 900;
-        background: {_title_grad};
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        margin-bottom: 0; letter-spacing: -2px; line-height: 1.1;
+        font-size: 2.2rem; font-weight: 800;
+        color: {_text} !important;
+        margin-bottom: 0; letter-spacing: -1px; line-height: 1.2;
     }}
     .dashboard-subtitle {{
         font-size: 1.05rem; color: {_text2}; margin-top: 4px; margin-bottom: 10px;
@@ -195,7 +146,7 @@ st.markdown(f"""
     }}
     .section-header::before {{
         content: ''; display: block; width: 6px; height: 24px;
-        background: linear-gradient(180deg, #6366F1, #8B5CF6); border-radius: 4px;
+        background: {_accent}; border-radius: 4px;
     }}
 
     /* ── KPI cards ── */
@@ -203,13 +154,12 @@ st.markdown(f"""
         background: {_bg2} !important;
         border: 1px solid {_border_card} !important;
         border-radius: 16px; padding: 20px 24px;
-        box-shadow: 0 2px 12px rgba(99,102,241,0.07);
-        transition: all 0.25s ease;
+        box-shadow: 0 1px 4px {_shadow};
+        transition: all 0.2s ease;
     }}
     div[data-testid="metric-container"]:hover {{
-        transform: translateY(-3px);
         border-color: {_card_hover_border} !important;
-        box-shadow: 0 8px 24px rgba(99,102,241,0.13);
+        box-shadow: 0 4px 12px {_shadow};
     }}
     div[data-testid="metric-container"] label {{
         color: {_text2} !important;
@@ -322,7 +272,7 @@ st.markdown(f"""
         background-color: {_bg2} !important;
         border: 1px solid {_border_card} !important;
         border-radius: 10px !important;
-        box-shadow: 0 8px 24px rgba(99,102,241,0.12) !important;
+        box-shadow: 0 4px 16px {_shadow} !important;
     }}
     div[data-baseweb="popover"] li,
     div[data-baseweb="menu"] li,
@@ -341,7 +291,7 @@ st.markdown(f"""
         color: {_text} !important;
     }}
     li[aria-selected="true"] {{
-        background-color: rgba(99,102,241,0.12) !important;
+        background-color: {_accent_bg} !important;
     }}
 
     /* ── Text / number / date inputs ── */
@@ -354,8 +304,8 @@ st.markdown(f"""
     }}
     .stTextInput input:focus, .stNumberInput input:focus,
     .stDateInput input:focus, .stTextArea textarea:focus {{
-        border-color: #6366F1 !important;
-        box-shadow: 0 0 0 2px rgba(99,102,241,0.15) !important;
+        border-color: {_accent} !important;
+        box-shadow: 0 0 0 2px {_accent_bg} !important;
     }}
 
     /* ── Widget labels ── */
@@ -411,8 +361,8 @@ st.markdown(f"""
         --gdg-bg-header-hovered:   {_bg4} !important;
         --gdg-border-color:        {_border} !important;
         --gdg-horizontal-border-color: {_border} !important;
-        --gdg-accent-color:        #6366F1 !important;
-        --gdg-accent-light:        rgba(99,102,241,0.1) !important;
+        --gdg-accent-color:        {_accent} !important;
+        --gdg-accent-light:        {_accent_bg} !important;
         background-color:          {_bg2} !important;
         color:                     {_text} !important;
     }}
@@ -430,9 +380,9 @@ st.markdown(f"""
 
     /* ── Multiselect tags ── */
     span[data-baseweb="tag"] {{
-        background-color: rgba(99,102,241,0.12) !important;
+        background-color: {_accent_bg} !important;
         color: {_text} !important;
-        border: 1px solid rgba(99,102,241,0.2) !important;
+        border: 1px solid {_accent_border} !important;
     }}
     span[data-baseweb="tag"] span {{ color: {_text} !important; }}
 
@@ -467,8 +417,8 @@ st.markdown(f"""
     .st-jump-btn::after {{ content: "▼"; font-size: 0.7rem; color: {_text2}; }}
     .st-jump-content {{
         display: none; position: absolute; background-color: {_jump_content_bg};
-        min-width: 100%; box-shadow: 0 8px 24px rgba(99,102,241,0.12);
-        z-index: 10000; border: 1px solid #6366F1; border-radius: 8px;
+        min-width: 100%; box-shadow: 0 4px 16px {_shadow};
+        z-index: 10000; border: 1px solid {_accent}; border-radius: 8px;
         margin-top: 4px; max-height: 400px; overflow-y: auto;
     }}
     .st-jump-content a {{
@@ -478,30 +428,10 @@ st.markdown(f"""
     }}
     .st-jump-content a:last-child {{ border-bottom: none; }}
     .st-jump-content a:hover {{
-        background-color: rgba(99,102,241,0.1); color: {_text};
+        background-color: {_accent_bg}; color: {_text};
     }}
     .st-jump-menu:hover .st-jump-content {{ display: block; }}
-    .st-jump-menu:hover .st-jump-btn {{ border-color: #6366F1; }}
-
-    /* ── Theme toggle button ── */
-    .theme-toggle-fixed {{
-        position: fixed; top: 12px; right: 18px; z-index: 99999;
-    }}
-    .theme-toggle-fixed button {{
-        background: {_toggle_bg} !important;
-        color: {_toggle_color} !important;
-        border: 1px solid {_border} !important;
-        border-radius: 20px !important;
-        padding: 4px 14px !important;
-        font-size: 1rem !important;
-        cursor: pointer;
-        box-shadow: 0 2px 8px rgba(99,102,241,0.15);
-        font-family: 'Inter', sans-serif;
-    }}
-    .theme-toggle-fixed button:hover {{
-        box-shadow: 0 4px 12px rgba(99,102,241,0.3);
-        border-color: #6366F1 !important;
-    }}
+    .st-jump-menu:hover .st-jump-btn {{ border-color: {_accent}; }}
 
     .spacer {{ margin-top: 24px; }}
 
@@ -521,8 +451,8 @@ st.markdown(f"""
     .stButton > button:hover,
     div[data-testid="stButton"] > button:hover {{
         background-color: {_btn_bg_hover} !important;
-        border-color: #6366F1 !important;
-        box-shadow: 0 0 0 2px rgba(99,102,241,0.18) !important;
+        border-color: {_accent} !important;
+        box-shadow: 0 0 0 2px {_accent_bg} !important;
         color: {_btn_color} !important;
     }}
     .stButton > button:active,
@@ -542,8 +472,8 @@ st.markdown(f"""
     }}
     .stTabs [aria-selected="true"] {{
         color: {_text} !important;
-        border-bottom: 2px solid #6366F1 !important;
-        background: linear-gradient(180deg, rgba(99,102,241,0) 0%, rgba(99,102,241,0.08) 100%) !important;
+        border-bottom: 2px solid {_accent} !important;
+        background: transparent !important;
     }}
     .stTabs [data-baseweb="tab-panel"] {{
         background-color: transparent !important;
@@ -565,7 +495,7 @@ body [data-baseweb="select-dropdown"] {{
     background-color: {_bg2} !important;
     border: 1px solid {_border_card} !important;
     border-radius: 10px !important;
-    box-shadow: 0 8px 24px rgba(99,102,241,0.14) !important;
+    box-shadow: 0 4px 16px {_shadow} !important;
     color: {_text} !important;
 }}
 body div[data-baseweb="popover"] *,
@@ -583,7 +513,7 @@ body li[role="option"]:hover {{
     color: {_text} !important;
 }}
 body li[aria-selected="true"] {{
-    background-color: rgba(99,102,241,0.15) !important;
+    background-color: {_accent_bg} !important;
     color: {_text} !important;
 }}
 /* Selectbox trigger box */
@@ -600,9 +530,9 @@ body div[data-baseweb="select"] input {{
 body div[data-baseweb="select"] svg {{ fill: {_text2} !important; }}
 /* Multiselect tags in body */
 body span[data-baseweb="tag"] {{
-    background-color: rgba(99,102,241,0.12) !important;
+    background-color: {_accent_bg} !important;
     color: {_text} !important;
-    border: 1px solid rgba(99,102,241,0.2) !important;
+    border: 1px solid {_accent_border} !important;
 }}
 body span[data-baseweb="tag"] span {{ color: {_text} !important; }}
 </style>
@@ -649,8 +579,8 @@ components.html(f"""
                     
                     btn.addEventListener('mouseover', () => {{
                         span.style.background = '{_bg3}';
-                        span.style.borderColor = '#6366F1';
-                        span.style.color = '#6366F1';
+                        span.style.borderColor = '{_accent}';
+                        span.style.color = '{_accent}';
                     }});
                     btn.addEventListener('mouseout', () => {{
                         span.style.background = '{_bg2}';
@@ -1334,13 +1264,13 @@ with _btn_col:
     _sum_open = st.session_state["show_summary"]
 
     # Styles for both buttons
-    _sc_bg     = "linear-gradient(135deg, #F43F5E 0%, #E11D48 100%)"  if _sc_open  else "linear-gradient(135deg, #818CF8 0%, #A78BFA 100%)"
-    _sc_shadow = ("0 4px 20px rgba(244,63,94,0.5)"                    if _sc_open  else "0 4px 20px rgba(129,140,248,0.5)")
-    _sc_border = ("1px solid rgba(244,63,94,0.6)"                     if _sc_open  else "1px solid rgba(129,140,248,0.6)")
+    _sc_bg     = "linear-gradient(135deg, #F43F5E 0%, #E11D48 100%)"  if _sc_open  else "linear-gradient(135deg, #d4500a 0%, #c04000 100%)"
+    _sc_shadow = ("0 4px 20px rgba(244,63,94,0.4)"                    if _sc_open  else "0 4px 20px rgba(212,80,10,0.4)")
+    _sc_border = ("1px solid rgba(244,63,94,0.6)"                     if _sc_open  else "1px solid rgba(212,80,10,0.6)")
     _sc_label  = "✕  Close Checker"                                   if _sc_open  else "🔍  Sample Checker"
 
     _sm_bg     = "linear-gradient(135deg, #F43F5E 0%, #E11D48 100%)"  if _sum_open else "linear-gradient(135deg, #10B981 0%, #059669 100%)"
-    _sm_shadow = ("0 4px 20px rgba(244,63,94,0.5)"                    if _sum_open else "0 4px 20px rgba(16,185,129,0.5)")
+    _sm_shadow = ("0 4px 20px rgba(244,63,94,0.4)"                    if _sum_open else "0 4px 20px rgba(16,185,129,0.4)")
     _sm_border = ("1px solid rgba(244,63,94,0.6)"                     if _sum_open else "1px solid rgba(16,185,129,0.6)")
     _sm_label  = "✕  Close Detailed View"                             if _sum_open else "📋  Detailed View"
 
@@ -1353,7 +1283,7 @@ div[data-testid="stButton"]:has(button[key="toggle_sample_checker"]) button {{
     font-weight: 700 !important; font-size: 0.85rem !important;
     letter-spacing: 0.03em !important; border-radius: 12px !important;
     padding: 10px 16px !important; box-shadow: {_sc_shadow} !important;
-    transition: all 0.2s ease !important; text-shadow: 0 1px 3px rgba(0,0,0,0.3) !important;
+    transition: all 0.2s ease !important; text-shadow: 0 1px 3px rgba(0,0,0,0.2) !important;
 }}
 div[data-testid="stButton"]:has(button[key="toggle_summary"]) button {{
     background: {_sm_bg} !important;
@@ -1362,25 +1292,15 @@ div[data-testid="stButton"]:has(button[key="toggle_summary"]) button {{
     font-weight: 700 !important; font-size: 0.85rem !important;
     letter-spacing: 0.03em !important; border-radius: 12px !important;
     padding: 10px 16px !important; box-shadow: {_sm_shadow} !important;
-    transition: all 0.2s ease !important; text-shadow: 0 1px 3px rgba(0,0,0,0.3) !important;
+    transition: all 0.2s ease !important; text-shadow: 0 1px 3px rgba(0,0,0,0.2) !important;
 }}
 div[data-testid="stButton"]:has(button[key="toggle_sample_checker"]) button:hover,
-div[data-testid="stButton"]:has(button[key="toggle_summary"]) button:hover,
-div[data-testid="stButton"]:has(button[key="toggle_theme"]) button:hover {{
-    filter: brightness(1.12) !important; transform: translateY(-2px) !important;
-}}
-div[data-testid="stButton"]:has(button[key="toggle_theme"]) button {{
-    background: {_bg2} !important;
-    border: 1px solid {_border_card} !important;
-    color: {_text} !important;
-    font-weight: 700 !important; font-size: 0.85rem !important;
-    letter-spacing: 0.03em !important; border-radius: 12px !important;
-    padding: 10px 16px !important; box-shadow: 0 4px 20px rgba(0,0,0,0.05) !important;
-    transition: all 0.2s ease !important;
+div[data-testid="stButton"]:has(button[key="toggle_summary"]) button:hover {{
+    filter: brightness(1.1) !important; transform: translateY(-1px) !important;
 }}
 </style>
 """, unsafe_allow_html=True)
-    _b1, _b2, _b3 = st.columns([2, 2, 1])
+    _b1, _b2 = st.columns([1, 1])
     with _b1:
         if st.button(_sm_label, key="toggle_summary", use_container_width=True):
             st.session_state["show_summary"] = not _sum_open
@@ -1391,21 +1311,17 @@ div[data-testid="stButton"]:has(button[key="toggle_theme"]) button {{
             st.session_state["show_sample_checker"] = not _sc_open
             st.session_state["show_summary"] = False
             st.rerun()
-    with _b3:
-        if st.button(_theme_icon, key="toggle_theme", help="Toggle dark / light mode", use_container_width=True):
-            st.session_state["dark_mode"] = not _dark
-            st.rerun()
 
 # ── Issue color palette (shared: sample checker, quality chart, popup) ────────
 _ISSUE_COLORS = {
     "reject_bleed_through":            "#FB923C",  # orange       (warm)
-    "reject_blur":                     "#818CF8",  # indigo       (cool)
+    "reject_blur":                     "#2563eb",  # blue         (cool)
     "reject_lighting":                 "#FBBF24",  # amber        (warm)
     "reject_sparsity":                 "#06B6D4",  # cyan         (cool)
     "reject_rotation_mismatch":        "#E879F9",  # fuchsia      (vibrant)
     "reject_subject_content_mismatch": "#F472B6",  # pink         (vibrant)
     "reject_source_type_mismatch":     "#38BDF8",  # sky blue     (cool)
-    "reject_cutoff":                   "#A78BFA",  # violet       (cool)
+    "reject_cutoff":                   "#7c3aed",  # purple       (cool)
     "pii_flag":                        "#FCD34D",  # gold         (warm neutral)
 }
 
@@ -1943,9 +1859,9 @@ if not st.session_state.get("show_summary"):
                font-family:"Georgia","Times New Roman",serif;
                letter-spacing:-1.5px;text-shadow:0 0 24px #F9A8D455;'>{total_pages:,}</span>
   <span> pages from </span>
-  <span style='font-size:2.6rem;font-weight:900;color:#818CF8;
+  <span style='font-size:2.6rem;font-weight:900;color:#d4500a;
                font-family:"Courier New","Courier",monospace;
-               letter-spacing:-1px;text-shadow:0 0 20px #818CF855;'>{n_students:,}</span>
+               letter-spacing:-1px;text-shadow:0 0 20px rgba(212,80,10,0.25);'>{n_students:,}</span>
   <span> students across </span>
   <span style='font-size:2.6rem;font-weight:900;color:#34D399;
                font-family:"Georgia","Times New Roman",serif;
@@ -2001,9 +1917,9 @@ if not st.session_state.get("show_summary"):
     st.markdown(f"""
 <style>
 div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
-    background: {'rgba(129,140,248,0.18)' if _stp_open else _bg2} !important;
-    border: 1px solid {'rgba(129,140,248,0.5)' if _stp_open else _border_card} !important;
-    color: {'#818CF8' if _stp_open else _text2} !important;
+    background: {_accent_bg if _stp_open else _bg2} !important;
+    border: 1px solid {_accent_border if _stp_open else _border_card} !important;
+    color: {_accent if _stp_open else _text2} !important;
     font-size: 0.72rem !important; font-weight: 700 !important;
     text-transform: uppercase; letter-spacing: 0.08em !important;
     border-radius: 8px !important; padding: 5px 14px !important;
@@ -2052,9 +1968,9 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
     # ════════════════════════════════════════════════════════
     with _col_left:
         st.markdown(f"""
-<div style='font-size:0.72rem;font-weight:700;color:#818CF8;text-transform:uppercase;
+<div style='font-size:0.72rem;font-weight:700;color:#d4500a;text-transform:uppercase;
             letter-spacing:0.12em;margin-bottom:12px;display:flex;align-items:center;gap:8px;'>
-  <span style='display:inline-block;width:4px;height:16px;background:#818CF8;border-radius:3px;'></span>
+  <span style='display:inline-block;width:4px;height:16px;background:#d4500a;border-radius:3px;'></span>
   Collection
 </div>""", unsafe_allow_html=True)
 
@@ -2071,9 +1987,9 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
                 .sort_values("Pages", ascending=True)
             )
             st.markdown(f"""
-<div style='background:rgba(129,140,248,0.08);border:1px solid rgba(129,140,248,0.2);
+<div style='background:rgba(212,80,10,0.06);border:1px solid rgba(212,80,10,0.2);
             border-radius:14px;padding:14px 16px 10px;margin-bottom:6px;'>
-  <div style='font-size:0.65rem;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>States</div>
+  <div style='font-size:0.65rem;font-weight:700;color:#d4500a;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:2px;'>States</div>
   <div style='font-size:1.8rem;font-weight:900;color:{_text};line-height:1;'>{n_states}</div>
   <div style='font-size:0.7rem;color:{_text3};margin-top:2px;'>{n_districts} districts · {n_blocks} blocks</div>
 </div>""", unsafe_allow_html=True)
@@ -2086,7 +2002,7 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
                     _fig_states = go.Figure(go.Bar(
                         x=_state_rows["State"],
                         y=_state_rows["Pages"],
-                        marker_color="#818CF8",
+                        marker_color="#d4500a",
                         text=[f"{int(v):,}" for v in _state_rows["Pages"]],
                         textposition="outside",
                         textfont=dict(size=10, color=_chart_text),
@@ -2294,8 +2210,8 @@ div[data-testid="stButton"]:has(button[key="toggle_state_targets"]) button {{
     </div>
     <div style='width:1px;background:{_border_card};align-self:stretch;margin:4px 0;'></div>
     <div style='flex:1;min-width:90px;text-align:center;padding:4px 10px;'>
-      <div style='font-size:0.55rem;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>Completed</div>
-      <div style='font-size:1.5rem;font-weight:900;color:#818CF8;line-height:1;'>{_q_reviewed_pages:,}</div>
+      <div style='font-size:0.55rem;font-weight:700;color:#d4500a;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px;'>Completed</div>
+      <div style='font-size:1.5rem;font-weight:900;color:#d4500a;line-height:1;'>{_q_reviewed_pages:,}</div>
       <div style='font-size:0.55rem;color:{_text4};margin-top:2px;'>{_q_reviewed:,} uploads</div>
     </div>
     <div style='width:1px;background:{_border_card};align-self:stretch;margin:4px 0;'></div>
@@ -2491,7 +2407,7 @@ if not st.session_state.get("show_summary") and st.session_state.get("state_deta
     # Close button
     _sdcol, _ = st.columns([2, 6])
     with _sdcol:
-        st.markdown(f"<div style='font-size:1.1rem;font-weight:800;color:#818CF8;margin-bottom:8px;'>📍 {_sd_state} — Detailed Stats</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:1.1rem;font-weight:800;color:#d4500a;margin-bottom:8px;'>📍 {_sd_state} — Detailed Stats</div>", unsafe_allow_html=True)
     if st.button("✕ Close", key="close_state_detail"):
         st.session_state["state_detail_open"] = None
         st.rerun()
@@ -2504,9 +2420,9 @@ if not st.session_state.get("show_summary") and st.session_state.get("state_deta
     _sd_clr   = "#10B981" if _sd_pct >= 100 else "#F59E0B" if _sd_pct >= 60 else "#F43F5E"
     _sd_bar   = min(_sd_pct, 100)
     st.markdown(f"""
-<div style='margin-bottom:24px;background:rgba(129,140,248,0.06);border:1px solid rgba(129,140,248,0.15);
+<div style='margin-bottom:24px;background:rgba(212,80,10,0.06);border:1px solid rgba(212,80,10,0.15);
             border-radius:14px;padding:18px 22px;'>
-  <div style='font-size:0.72rem;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;'>
+  <div style='font-size:0.72rem;font-weight:700;color:#d4500a;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;'>
     Progress towards state goal
   </div>
   <div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;'>
@@ -2554,7 +2470,7 @@ if not st.session_state.get("show_summary") and st.session_state.get("state_deta
         _fig_cls.add_trace(go.Bar(
             x=_sd_class_all,
             y=[int(_other_pages.get(c, 0)) for c in _sd_class_all],
-            name="Other / Unknown", marker_color="#A78BFA",
+            name="Other / Unknown", marker_color="#b45309",
             text=[int(_other_pages.get(c, 0)) for c in _sd_class_all],
             textposition="inside", textfont=dict(size=10, color="#1E1B4B"),
         ))
@@ -2581,7 +2497,7 @@ if not st.session_state.get("show_summary") and st.session_state.get("state_deta
     _fig_avg.add_trace(go.Bar(
         x=_avg_classes,
         y=_sd_avg.set_index("_cls")["avg_pages"].reindex(_avg_classes).tolist(),
-        name="Avg pages/student", marker_color="#818CF8",
+        name="Avg pages/student", marker_color="#d4500a",
         text=[f"{v:.1f}" for v in _sd_avg.set_index("_cls")["avg_pages"].reindex(_avg_classes)],
         textposition="outside", textfont=dict(size=11),
     ))
@@ -2921,7 +2837,7 @@ if not st.session_state.get("show_summary") and st.session_state.get("lang_detai
         )
         _fig_lang_stu = go.Figure(go.Bar(
             x=_lang_stu["students"], y=_lang_stu["regional_language"],
-            orientation="h", marker_color="#A78BFA",
+            orientation="h", marker_color="#b45309",
             text=_lang_stu["students"], textposition="outside", textfont=dict(size=11),
         ))
         _fig_lang_stu.update_layout(**chart_layout(title="Students per Language", height=max(280, _n_langs * 40)))
@@ -3001,7 +2917,7 @@ if not st.session_state.get("show_summary") and st.session_state.get("lang_detai
             )
             _fig_ll_stu = go.Figure(go.Bar(
                 x=_ll_cls_stu["_cls"], y=_ll_cls_stu["student_id"],
-                marker_color="#A78BFA",
+                marker_color="#b45309",
                 text=_ll_cls_stu["student_id"], textposition="outside", textfont=dict(size=10),
             ))
             _fig_ll_stu.add_hline(y=25, line_dash="dash", line_color="#F59E0B", line_width=2,
@@ -3050,10 +2966,10 @@ if st.session_state.get("show_summary"):
     <div style='display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px;'>
 
       <!-- Total Pages — primary hero -->
-      <div style='background:linear-gradient(135deg,rgba(129,140,248,0.12),rgba(167,139,250,0.06));
-                  border:1px solid rgba(129,140,248,0.3);border-radius:14px;padding:18px 22px;
+      <div style='background:linear-gradient(135deg,rgba(212,80,10,0.12),rgba(212,80,10,0.06));
+                  border:1px solid rgba(212,80,10,0.3);border-radius:14px;padding:18px 22px;
                   display:flex;flex-direction:column;justify-content:space-between;'>
-        <div style='font-size:0.7rem;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:0.1em;'>
+        <div style='font-size:0.7rem;font-weight:700;color:#d4500a;text-transform:uppercase;letter-spacing:0.1em;'>
           Total Pages Collected
         </div>
         <div style='font-size:2.6rem;font-weight:900;color:{_text};letter-spacing:-1px;line-height:1.1;margin-top:6px;'>
@@ -3266,7 +3182,7 @@ if st.session_state.get("show_summary"):
     """, unsafe_allow_html=True)
 
             # ── 2b. Class-Level Page & Participant Targets ──
-            _lvl_colors = {"Primary (1-5)": "#818CF8", "High School (6-8)": "#34D399", "Secondary (9-10)": "#F472B6", "Higher Secondary (11-12)": "#FBBF24"}
+            _lvl_colors = {"Primary (1-5)": "#2563eb", "High School (6-8)": "#34D399", "Secondary (9-10)": "#F472B6", "Higher Secondary (11-12)": "#FBBF24"}
             _lvl_short  = {"Primary (1-5)": "Primary", "High School (6-8)": "High School", "Secondary (9-10)": "Secondary", "Higher Secondary (11-12)": "Higher Sec."}
 
             tg1, tg2 = st.columns(2)
@@ -3676,7 +3592,7 @@ if st.session_state.get("show_summary"):
                 _legend = (
                     f"<div style='font-size:0.72rem;color:{_text2};margin-bottom:10px;line-height:1.6;'>"
                     f"<b style='color:{_text3};'>All 5 Core Subjects</b> = "
-                    f"<span style='background:rgba(99,102,241,0.12);color:#818CF8;border-radius:4px;padding:1px 6px;font-weight:600;'>English</span>&nbsp;"
+                    f"<span style='background:rgba(212,80,10,0.12);color:#d4500a;border-radius:4px;padding:1px 6px;font-weight:600;'>English</span>&nbsp;"
                     f"<span style='background:rgba(52,211,153,0.12);color:#34D399;border-radius:4px;padding:1px 6px;font-weight:600;'>Mathematics</span>&nbsp;"
                     f"<span style='background:rgba(251,191,36,0.12);color:#FBBF24;border-radius:4px;padding:1px 6px;font-weight:600;'>Regional Language</span>"
                     f"<span style='color:{_text2};font-size:0.67rem;'> (Hindi, Sanskrit, or any Indic)</span>&nbsp;"
@@ -3908,8 +3824,8 @@ if st.session_state.get("show_summary"):
 
         st.markdown(f"""
     <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;'>
-      <div style='background:rgba(129,140,248,0.08);border:1px solid rgba(129,140,248,0.25);border-radius:10px;padding:12px 16px;'>
-        <div style='font-size:0.65rem;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:.08em;'>Districts</div>
+      <div style='background:rgba(212,80,10,0.08);border:1px solid rgba(212,80,10,0.25);border-radius:10px;padding:12px 16px;'>
+        <div style='font-size:0.65rem;font-weight:700;color:#d4500a;text-transform:uppercase;letter-spacing:.08em;'>Districts</div>
         <div style='font-size:1.6rem;font-weight:800;color:{_text3};line-height:1.1;margin-top:4px;'>{_d_n_districts}</div>
       </div>
       <div style='background:rgba(52,211,153,0.07);border:1px solid rgba(52,211,153,0.2);border-radius:10px;padding:12px 16px;'>
@@ -4226,7 +4142,7 @@ if st.session_state.get("show_summary"):
         heat = filtered.groupby(["class_level", "subject_category"])["num_pages"].sum().unstack(fill_value=0)
         fig = go.Figure(go.Heatmap(
             z=heat.values, x=heat.columns.tolist(), y=heat.index.tolist(),
-            colorscale=[[0, "#1E1B4B"], [0.3, "#4338CA"], [0.6, "#818CF8"], [1.0, "#C7D2FE"]],
+            colorscale=[[0, "#fef3c7"], [0.3, "#f97316"], [0.6, "#d4500a"], [1.0, "#7c2d12"]],
             text=heat.values, texttemplate="%{text:,}",
             textfont=dict(color=_text, size=11),
         ))
@@ -4410,7 +4326,7 @@ if st.session_state.get("show_summary"):
 
     with _cq_cols[1]:
         _cq_pie(filtered["printed"], ["yes", "no"],
-                "Printed Content", "#818CF8", "#94A3B8", "cq_pr")
+                "Printed Content", "#d4500a", "#94A3B8", "cq_pr")
 
     with _cq_cols[2]:
         _cq_pie(filtered["mixed_content"], ["yes", "no"],
@@ -4568,7 +4484,7 @@ if st.session_state.get("show_summary"):
 <div style='display:flex;gap:8px;margin-bottom:8px;'>
   <div style='flex:1;background:{_bg3};border:1px solid {_border_card};border-radius:10px;padding:10px;text-align:center;'>
     <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Median</div>
-    <div style='font-size:1.3rem;font-weight:800;color:#818CF8;'>{_rt_med}h</div>
+    <div style='font-size:1.3rem;font-weight:800;color:#d4500a;'>{_rt_med}h</div>
   </div>
   <div style='flex:1;background:{_bg3};border:1px solid {_border_card};border-radius:10px;padding:10px;text-align:center;'>
     <div style='font-size:0.58rem;color:{_text2};text-transform:uppercase;letter-spacing:.07em;'>Mean</div>
@@ -4649,7 +4565,7 @@ if st.session_state.get("show_summary"):
             labels=[("In Data Bucket" if l else "Not in Bucket") for l in _db_counts.index],
             values=_db_counts.values,
             hole=0.55,
-            marker=dict(colors=["#818CF8", "#6B7280"]),
+            marker=dict(colors=["#d4500a", "#6B7280"]),
             textinfo="percent+label",
             hovertemplate="%{label}: %{value:,} (%{percent})<extra></extra>",
         ))
