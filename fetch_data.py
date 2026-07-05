@@ -27,10 +27,12 @@ from s3_helpers import MINIO_PREFIX
 load_dotenv()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+import os
+
 BASE_DIR        = Path(__file__).parent
 CACHE_PARQUET   = BASE_DIR / "data_cache.parquet"
 LAST_UPDATED    = BASE_DIR / ".last_updated.json"
-APPROVED_CSV    = BASE_DIR / "ref" / "approved_uploads.csv"
+APPROVED_CSV    = Path(os.environ.get("APPROVED_CSV_PATH", str(BASE_DIR / "approved_uploads.csv")))
 
 logging.basicConfig(
     level=logging.INFO,
